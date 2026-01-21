@@ -553,6 +553,9 @@ class PiyasaWidget:
                     messagebox.showerror("Hata", "JSON formatı geçersiz (Liste olmalı).")
             except Exception as e:
                 messagebox.showerror("Hata", f"İçe aktarma hatası: {e}")
+            finally:
+                # Arayüzü güncelle
+                self.veri_getir()
 
     def open_settings(self, event=None):
         # Menüyü butonun olduğu yerde aç
