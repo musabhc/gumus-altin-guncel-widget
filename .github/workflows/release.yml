@@ -46,7 +46,8 @@ jobs:
         
     - name: Sign EXE
       run: |
-        & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" sign /f cert.pfx /p password /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d "PiyasaWidget" dist\PiyasaWidget.exe || echo "Signtool failed, skipping..."
+        $signtool = Resolve-Path "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -Last 1
+        & $signtool sign /f cert.pfx /p password /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d "PiyasaWidget" dist\PiyasaWidget.exe || echo "Signtool failed, skipping..."
 
     - name: Build Installer (Inno Setup)
       run: |
@@ -57,7 +58,8 @@ jobs:
         
     - name: Sign Installer
       run: |
-         & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" sign /f cert.pfx /p password /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d "PiyasaWidget Setup" Output\PiyasaWidget_Setup.exe || echo "Signtool failed (Installer), skipping..."
+         $signtool = Resolve-Path "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -Last 1
+         & $signtool sign /f cert.pfx /p password /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d "PiyasaWidget Setup" Output\PiyasaWidget_Setup.exe || echo "Signtool failed (Installer), skipping..."
         
     - name: Create Release
       uses: softprops/action-gh-release@v1
