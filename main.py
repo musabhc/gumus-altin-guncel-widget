@@ -428,6 +428,11 @@ class PiyasaWidget:
         btn_import = tk.Label(btn_frame, text="📥", bg=self.bg_color, fg="#555555", font=("Segoe UI", 12), cursor="hand2")
         btn_import.pack(side="left", padx=(10, 0))
         btn_import.bind("<Button-1>", lambda e: self.import_transactions())
+
+        # Yenile Butonu
+        btn_refresh = tk.Label(btn_frame, text="🔄", bg=self.bg_color, fg="#555555", font=("Segoe UI", 12), cursor="hand2")
+        btn_refresh.pack(side="left", padx=(10, 0))
+        btn_refresh.bind("<Button-1>", lambda e: self.veri_getir())
         
         # Son güncelleme saati (küçük)
         self.var_time = tk.StringVar(value="Başlatılıyor...")
