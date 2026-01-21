@@ -38,7 +38,7 @@ Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescrip
 
 [Files]
 ; IMPORTANT: The source path below assumes you build the exe into 'dist' folder relative to this script
-Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\{#MyAppName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 ; Bundle default transactions only if not exists (so we don't overwrite user data on update)
 ; NOTE: Inno Setup 'onlyifdoesntexist' flag is useful here.

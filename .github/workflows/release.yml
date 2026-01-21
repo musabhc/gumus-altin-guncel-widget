@@ -42,12 +42,12 @@ jobs:
 
     - name: Build EXE
       run: |
-        pyinstaller --onefile --noconsole --name "PiyasaWidget" --icon=icon.ico --hidden-import=_version main.py
+        pyinstaller --onedir --noconsole --name "PiyasaWidget" --icon=icon.ico --hidden-import=_version main.py
         
     - name: Sign EXE
       run: |
         $signtool = Resolve-Path "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" | Select-Object -Last 1
-        & $signtool sign /f cert.pfx /p password /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d "PiyasaWidget" dist\PiyasaWidget.exe || echo "Signtool failed, skipping..."
+        & $signtool sign /f cert.pfx /p password /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d "PiyasaWidget" dist\PiyasaWidget\PiyasaWidget.exe || echo "Signtool failed, skipping..."
 
     - name: Build Installer (Inno Setup)
       run: |
