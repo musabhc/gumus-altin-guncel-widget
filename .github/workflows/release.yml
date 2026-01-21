@@ -1,0 +1,50 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Generate Version
+      id: version
+      run: |
+        $ver = "1.0.${{ github.run_number }}"
+        echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
+        echo "__version__ = '$ver'" > _version.py
+        
+    - name: Install Dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller requests yfinance
+        
+    - name: Build EXE
+      run: |
+        pyinstaller --onefile --noconsole --name "PiyasaWidget" --hidden-import=_version main.py
+        
+    - name: Build Installer (Inno Setup)
+      uses: Minionguyjosh/inno-setup-action@v1.2.2
+      with:
+        path: setup.iss
+        
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ steps.version.outputs.VERSION }}
+        name: Release v${{ steps.version.outputs.VERSION }}
+        files: |
+          dist/PiyasaWidget.exe
+          Output/PiyasaWidget_Setup.exe
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

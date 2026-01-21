@@ -8,8 +8,20 @@ import json
 import os
 import winreg
 import ctypes
+import requests
+import webbrowser
+import subprocess
 from datetime import datetime
 from tkinter import messagebox
+
+# Configuration
+GITHUB_REPO = "musabhc/gumus-altin-guncel-widget"
+
+try:
+    import _version
+    VERSION = _version.__version__
+except ImportError:
+    VERSION = "0.0.0-dev"
 
 
 class TransactionManager:
@@ -76,6 +88,51 @@ class AutoStartManager:
             winreg.CloseKey(key)
         except Exception as e:
             messagebox.showerror("Hata", f"Kayıt defteri hatası: {e}")
+
+class UpdateManager:
+    def __init__(self, current_version, repo_name):
+        self.current_version = current_version
+        self.repo_name = repo_name
+        self.api_url = f"https://api.github.com/repos/{repo_name}/releases/latest"
+        
+    def check_for_updates(self):
+        try:
+            response = requests.get(self.api_url)
+            if response.status_code == 200:
+                data = response.json()
+                latest_tag = data.get("tag_name", "").replace("v", "")
+                download_url = ""
+                
+                # Varlıklar içinde .exe ara (Setup öncelikli)
+                for asset in data.get("assets", []):
+                    if asset["name"].endswith("Setup.exe"):
+                        download_url = asset["browser_download_url"]
+                        break
+                    elif asset["name"].endswith(".exe"):
+                        download_url = asset["browser_download_url"]
+                
+                if latest_tag > self.current_version and download_url:
+                    return True, latest_tag, download_url
+            return False, None, None
+        except Exception as e:
+            print(f"Update Check Error: {e}")
+            return False, None, None
+
+    def update_application(self, download_url):
+        try:
+            # İndirme işlemi
+            temp_path = os.path.join(os.environ["TEMP"], "PiyasaWidget_Update.exe")
+            response = requests.get(download_url, stream=True)
+            with open(temp_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
+            # Installer'ı çalıştır ve uygulamayı kapat
+            subprocess.Popen([temp_path, "/SILENT"]) # Silent kurulum deneyebiliriz veya normal
+            return True
+        except Exception as e:
+            messagebox.showerror("Hata", f"Güncelleme hatası: {e}")
+            return False
 
 class PortfolioManagerDialog(tk.Toplevel):
     def __init__(self, parent, manager, on_save_callback, current_dollar_rate):
@@ -305,6 +362,7 @@ class PiyasaWidget:
         # Managers
         self.tm = TransactionManager()
         self.asm = AutoStartManager()
+        self.um = UpdateManager(VERSION, GITHUB_REPO)
         
         # UI Elemanları
         self.setup_ui()
@@ -369,13 +427,28 @@ class PiyasaWidget:
         # --- Ayarlar Menüsü (Dropdown) ---
         self.settings_menu = tk.Menu(self.root, tearoff=0, bg="#2d2d2d", fg="white", activebackground="#007acc", activeforeground="white", font=("Segoe UI", 9))
         self.var_autostart = tk.BooleanVar(value=self.asm.is_enabled())
+        
+        self.settings_menu.add_command(label=f"Versiyon: {VERSION}", state="disabled")
+        self.settings_menu.add_separator()
         self.settings_menu.add_checkbutton(label="Başlangıçta Çalıştır", variable=self.var_autostart, command=self.toggle_autostart)
-        # Menüye başka seçenekler de eklenebilir (örn: Kapat)
+        self.settings_menu.add_command(label="Güncellemeleri Kontrol Et", command=self.check_updates)
         self.settings_menu.add_separator()
         self.settings_menu.add_command(label="Çıkış", command=self.kapat)
 
     def toggle_autostart(self):
         self.asm.set_autostart(self.var_autostart.get())
+        
+    def check_updates(self):
+        has_update, new_version, url = self.um.check_for_updates()
+        if has_update:
+            if messagebox.askyesno("Güncelleme Mevcut", f"Yeni sürüm bulundu: v{new_version}\nŞimdi indirilip kurulsun mu?"):
+                self.var_time.set("Güncelleme indiriliyor...")
+                self.root.update()
+                if self.um.update_application(url):
+                    self.root.destroy()
+                    sys.exit()
+        else:
+            messagebox.showinfo("Güncelleme", "Uygulama güncel!")
 
     def veri_getir(self):
         try:
