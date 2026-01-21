@@ -32,14 +32,32 @@ jobs:
         python -m pip install --upgrade pip
         pip install pyinstaller requests yfinance
         
+    - name: Create Self-Signed Certificate
+      run: |
+        $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=PiyasaWidget" -CertStoreLocation "Cert:\CurrentUser\My"
+        $certPath = "cert.pfx"
+        $pwd = ConvertTo-SecureString "password" -AsPlainText -Force
+        Export-PfxCertificate -Cert $cert -FilePath $certPath -Password $pwd
+        echo "CERT_PATH=$certPath" >> $env:GITHUB_ENV
+
     - name: Build EXE
       run: |
-        pyinstaller --onefile --noconsole --name "PiyasaWidget" --hidden-import=_version main.py
+        pyinstaller --onefile --noconsole --name "PiyasaWidget" --icon=icon.ico --hidden-import=_version main.py
         
+    - name: Sign EXE
+      run: |
+        & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" sign /f cert.pfx /p password /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d "PiyasaWidget" dist\PiyasaWidget.exe || echo "Signtool failed, skipping..."
+
     - name: Build Installer (Inno Setup)
       run: |
         choco install innosetup
+        # Inno Setup Sign Tool Configuration (Advanced - usually needs GUI config or complex CLI)
+        # For simplicity, we just sign the output installer after compilation
         & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
+        
+    - name: Sign Installer
+      run: |
+         & "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe" sign /f cert.pfx /p password /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /d "PiyasaWidget Setup" Output\PiyasaWidget_Setup.exe || echo "Signtool failed (Installer), skipping..."
         
     - name: Create Release
       uses: softprops/action-gh-release@v1

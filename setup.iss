@@ -27,6 +27,7 @@ OutputBaseFilename=PiyasaWidget_Setup
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=icon.ico
 
 [Languages]
 Name: "turkish"; MessagesFile: "compiler:Languages\Turkish.isl"
@@ -38,6 +39,7 @@ Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescrip
 [Files]
 ; IMPORTANT: The source path below assumes you build the exe into 'dist' folder relative to this script
 Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 ; Bundle default transactions only if not exists (so we don't overwrite user data on update)
 ; NOTE: Inno Setup 'onlyifdoesntexist' flag is useful here.
 ; Or simply don't include it if the app creates it. App creates it if missing, so skipping to keep it light.

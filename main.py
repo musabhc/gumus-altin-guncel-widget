@@ -12,7 +12,7 @@ import requests
 import webbrowser
 import subprocess
 from datetime import datetime
-from tkinter import messagebox
+from tkinter import messagebox, filedialog
 
 # Configuration
 GITHUB_REPO = "musabhc/gumus-altin-guncel-widget"
@@ -351,6 +351,10 @@ class PiyasaWidget:
         self.root.attributes("-topmost", True) # Widget olduğu için görünür olmalı, genelde üstte tutulur ama opsiyonel. Varsayılan üstte kalsın.
         
         self.root.configure(bg=self.bg_color)
+        try:
+            self.root.iconbitmap("icon.ico")
+        except:
+             pass
         
         # Taskbar'dan gizleme (Windows Widget Modu)
         self.make_toolwindow()
@@ -419,6 +423,11 @@ class PiyasaWidget:
         btn_add = tk.Label(btn_frame, text="+", bg=self.bg_color, fg="#555555", font=("Arial", 12, "bold"), cursor="hand2")
         btn_add.pack(side="left")
         btn_add.bind("<Button-1>", lambda e: self.open_add_transaction())
+        
+        # İçe Aktar Butonu
+        btn_import = tk.Label(btn_frame, text="📥", bg=self.bg_color, fg="#555555", font=("Segoe UI", 12), cursor="hand2")
+        btn_import.pack(side="left", padx=(10, 0))
+        btn_import.bind("<Button-1>", lambda e: self.import_transactions())
         
         # Son güncelleme saati (küçük)
         self.var_time = tk.StringVar(value="Başlatılıyor...")
@@ -517,6 +526,33 @@ class PiyasaWidget:
              pass
              
         PortfolioManagerDialog(self.root, self.tm, self.veri_getir, getattr(self, 'last_dolar_rate', 36.0))
+
+    def import_transactions(self):
+        filename = filedialog.askopenfilename(title="İçe Aktarılacak Dosyayı Seç", filetypes=[("JSON Files", "*.json")])
+        if filename:
+            try:
+                with open(filename, 'r', encoding='utf-8') as f:
+                    new_data = json.load(f)
+                
+                if isinstance(new_data, list):
+                    # Basit doğrulama: İlk öğe beklenen anahtarlara sahip mi?
+                    if new_data and ("amount_g" in new_data[0] or "total_tl" in new_data[0]):
+                        count = 0
+                        for item in new_data:
+                             self.tm.save(item) # Tek tek eklersek sürekli save çağırır, transaction manager'a bulk add eklemek daha iyi ama bu da çalışır.
+                             # Daha iyisi: self.tm.transactions.extend(new_data); self.tm.save_all()
+                             count += 1
+                        
+                        # Hepsini tek seferde kaydetmek daha performanslı olurdu ama tm.save tek tek ekleyip save ediyor.
+                        # Şimdilik sorun değil.
+                        
+                        messagebox.showinfo("Başarılı", f"{len(new_data)} adet işlem başarıyla içeri aktarıldı.")
+                    else:
+                        messagebox.showwarning("Uyarı", "Dosya formatı uyumsuz görünüyor veya boş.")
+                else:
+                    messagebox.showerror("Hata", "JSON formatı geçersiz (Liste olmalı).")
+            except Exception as e:
+                messagebox.showerror("Hata", f"İçe aktarma hatası: {e}")
 
     def open_settings(self, event=None):
         # Menüyü butonun olduğu yerde aç
