@@ -361,7 +361,7 @@ class PiyasaWidget:
         
         # Başlangıç Konumu (Sağ Üst)
         screen_width = self.root.winfo_screenwidth()
-        self.root.geometry(f"220x200+{screen_width-250}+50")
+        self.root.geometry(f"220x250+{screen_width-250}+50")
         
         # Managers
         self.tm = TransactionManager()
@@ -492,11 +492,19 @@ class PiyasaWidget:
         try:
             # Piyasa kontrolü
             if self.is_market_closed():
-                self.root.after(0, lambda: self.var_market_status.set("Piyasa: Kapalı"))
-                self.root.after(0, lambda: self.var_time.set(f"Son Kontrol: {time.strftime('%H:%M:%S')} (Uyku)"))
+                def set_closed_ui():
+                    self.var_market_status.set("• Piyasa Kapalı")
+                    self.lbl_market_status.config(fg=self.color_danger) # Kırmızı nokta
+                    self.var_time.set(f"{time.strftime('%H:%M')} (zZz)")
+                
+                self.root.after(0, set_closed_ui)
                 return # API isteği atma
 
-            self.root.after(0, lambda: self.var_market_status.set("Piyasa: Açık"))
+            def set_open_ui():
+                self.var_market_status.set("• Piyasa Açık")
+                self.lbl_market_status.config(fg=self.color_success) # Yeşil nokta
+            
+            self.root.after(0, set_open_ui)
 
             # XAGUSD=X hata verdiği için SI=F (Vadeli) geri dönüyoruz.
             tickers = yf.Tickers("SI=F GC=F TRY=X")
