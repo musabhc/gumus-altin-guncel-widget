@@ -361,7 +361,7 @@ class PiyasaWidget:
         
         # Başlangıç Konumu (Sağ Üst)
         screen_width = self.root.winfo_screenwidth()
-        self.root.geometry(f"220x250+{screen_width-250}+50")
+        self.root.geometry(f"260x300+{screen_width-290}+50")
         
         # Managers
         self.tm = TransactionManager()
@@ -385,71 +385,84 @@ class PiyasaWidget:
         self.update_thread.start()
         
     def setup_ui(self):
-        # Stil
-        style_font = ("Consolas", 11, "bold")
+        # --- Premium V2 Stil Tanımları ---
+        self.font_header = ("Segoe UI", 9)
+        self.font_label = ("Segoe UI Semibold", 9) 
+        self.font_value = ("Segoe UI", 11)
+        self.font_portfolio = ("Segoe UI", 20, "bold") # Büyük Varlık (Reduced to 20)
+        self.font_profit = ("Segoe UI", 10)
         
-        # Konteyner
-        self.frame = tk.Frame(self.root, bg=self.bg_color, padx=10, pady=10)
-        self.frame.pack(expand=True, fill="both")
+        # Renk Paleti (Ultra Dark)
+        self.bg_color = "#0f0f0f" # Deep Black override
+        self.root.configure(bg=self.bg_color)
         
-        # Etiketler (Değişkenler)
-        self.var_market_status = tk.StringVar(value="Piyasa: ...")
-        self.var_gumus_ons = tk.StringVar(value="Gümüş Ons: ...")
-        self.var_gumus_tl = tk.StringVar(value="Gümüş TL : ...")
-        self.var_altin_tl = tk.StringVar(value="Altın TL : ...")
+        self.color_card = "#141414"
+        self.color_text_main = "#ffffff"
+        self.color_text_dim = "#666666"
+        self.color_accent = "#2196f3"
+        self.color_success = "#2ecc71" # Emerald
+        self.color_danger = "#e74c3c" # Alizarin
+        self.color_gold = "#d4af37" # Rich Gold
         
-        tk.Label(self.frame, textvariable=self.var_market_status, bg=self.bg_color, fg="#00ccff", font=("Consolas", 10, "bold"), anchor="w").pack(fill="x", pady=(0, 5))
-        tk.Label(self.frame, textvariable=self.var_gumus_ons, bg=self.bg_color, fg=self.text_color, font=style_font, anchor="w").pack(fill="x")
-        tk.Label(self.frame, textvariable=self.var_gumus_tl, bg=self.bg_color, fg=self.text_color, font=style_font, anchor="w").pack(fill="x")
-        tk.Label(self.frame, textvariable=self.var_altin_tl, bg=self.bg_color, fg="#ffd700", font=style_font, anchor="w").pack(fill="x") # Altın sarısı
+        # Ana Konteyner
+        self.frame = tk.Frame(self.root, bg=self.bg_color, padx=15, pady=15)
+        self.frame.pack(fill="both", expand=True)
         
-        ttk.Separator(self.frame, orient='horizontal').pack(fill='x', pady=5)
+        # 1. ÜST HEADER (Durum Noktası + Saat)
+        header_frame = tk.Frame(self.frame, bg=self.bg_color)
+        header_frame.pack(fill="x", pady=(0, 15))
         
-        # Portföy
-        self.var_portfolio = tk.StringVar(value="Varlık: ...")
-        self.var_profit = tk.StringVar(value="Kar: ...")
+        self.var_market_status = tk.StringVar(value="•") 
+        self.lbl_market_status = tk.Label(header_frame, textvariable=self.var_market_status, bg=self.bg_color, fg=self.color_text_dim, font=("Arial", 14), anchor="w") # Nokta için Arial
+        self.lbl_market_status.pack(side="left")
         
-        tk.Label(self.frame, textvariable=self.var_portfolio, bg=self.bg_color, fg="#ffffff", font=("Consolas", 10), anchor="w").pack(fill="x")
-        tk.Label(self.frame, textvariable=self.var_profit, bg=self.bg_color, fg="#ffffff", font=("Consolas", 10), anchor="w").pack(fill="x")
-        
-        # Butonlar Konteyner
-        btn_frame = tk.Frame(self.frame, bg=self.bg_color)
-        btn_frame.pack(anchor="e", pady=(0, 0))
-        
-        # Ayarlar Butonu
-        btn_settings = tk.Label(btn_frame, text="⚙️", bg=self.bg_color, fg="#555555", font=("Segoe UI", 12), cursor="hand2")
-        btn_settings.pack(side="left", padx=(0, 10))
-        btn_settings.bind("<Button-1>", self.open_settings)
-        
-        # Ekle Butonu
-        btn_add = tk.Label(btn_frame, text="+", bg=self.bg_color, fg="#555555", font=("Arial", 12, "bold"), cursor="hand2")
-        btn_add.pack(side="left")
-        btn_add.bind("<Button-1>", lambda e: self.open_add_transaction())
-        
-        # İçe Aktar Butonu
-        btn_import = tk.Label(btn_frame, text="📥", bg=self.bg_color, fg="#555555", font=("Segoe UI", 12), cursor="hand2")
-        btn_import.pack(side="left", padx=(10, 0))
-        btn_import.bind("<Button-1>", lambda e: self.import_transactions())
+        self.var_time = tk.StringVar(value="--:--")
+        tk.Label(header_frame, textvariable=self.var_time, bg=self.bg_color, fg=self.color_text_dim, font=self.font_header, anchor="e").pack(side="right", pady=4) # Hizalama düzeltmesi
 
-        # Yenile Butonu
-        btn_refresh = tk.Label(btn_frame, text="🔄", bg=self.bg_color, fg="#555555", font=("Segoe UI", 12), cursor="hand2")
-        btn_refresh.pack(side="left", padx=(10, 0))
-        btn_refresh.bind("<Button-1>", lambda e: self.veri_getir())
+        # 2. PORTFÖY (Merkezi, Büyük)
+        portfolio_frame = tk.Frame(self.frame, bg=self.bg_color)
+        portfolio_frame.pack(fill="x", pady=(0, 20))
         
-        # Son güncelleme saati (küçük)
-        self.var_time = tk.StringVar(value="Başlatılıyor...")
-        tk.Label(self.frame, textvariable=self.var_time, bg=self.bg_color, fg="#888888", font=("Arial", 7), anchor="e").pack(fill="x", pady=(5,0))
+        tk.Label(portfolio_frame, text="TOPLAM VARLIK", bg=self.bg_color, fg=self.color_text_dim, font=("Segoe UI", 8), anchor="w").pack(fill="x")
+        
+        self.var_portfolio = tk.StringVar(value="₺...")
+        tk.Label(portfolio_frame, textvariable=self.var_portfolio, bg=self.bg_color, fg=self.color_text_main, font=self.font_portfolio, anchor="w").pack(fill="x")
+        
+        self.var_profit = tk.StringVar(value="...")
+        self.lbl_profit = tk.Label(portfolio_frame, textvariable=self.var_profit, bg=self.bg_color, fg=self.color_text_dim, font=self.font_profit, anchor="w")
+        self.lbl_profit.pack(fill="x")
 
-        # --- Ayarlar Menüsü (Dropdown) ---
-        self.settings_menu = tk.Menu(self.root, tearoff=0, bg="#2d2d2d", fg="white", activebackground="#007acc", activeforeground="white", font=("Segoe UI", 9))
-        self.var_autostart = tk.BooleanVar(value=self.asm.is_enabled())
+        # 3. PİYASA LİSTESİ
+        self.create_price_row("Gümüş ONS", "$...", "var_gumus_ons", self.color_text_main)
+        self.create_price_row("Gümüş TL", "₺...", "var_gumus_tl", self.color_text_main)
+        self.create_price_row("Altın TL", "₺...", "var_altin_tl", self.color_gold)
+
+        # 4. FOOTER (Gizli Butonlar)
+        footer_frame = tk.Frame(self.frame, bg=self.bg_color)
+        footer_frame.pack(side="bottom", fill="x", pady=(10, 0))
         
-        self.settings_menu.add_command(label=f"Versiyon: {VERSION}", state="disabled")
-        self.settings_menu.add_separator()
-        self.settings_menu.add_checkbutton(label="Başlangıçta Çalıştır", variable=self.var_autostart, command=self.toggle_autostart)
-        self.settings_menu.add_command(label="Güncellemeleri Kontrol Et", command=self.check_updates)
-        self.settings_menu.add_separator()
-        self.settings_menu.add_command(label="Çıkış", command=self.kapat)
+        def create_icon_btn(parent, text, command):
+            lbl = tk.Label(parent, text=text, bg=self.bg_color, fg="#333333", font=("Segoe UI Emoji", 10), cursor="hand2")
+            lbl.pack(side="right", padx=(10, 0))
+            lbl.bind("<Button-1>", lambda e: command())
+            lbl.bind("<Enter>", lambda e: lbl.config(fg="#888888"))
+            lbl.bind("<Leave>", lambda e: lbl.config(fg="#333333"))
+            return lbl
+
+        create_icon_btn(footer_frame, "⚙️", self.open_settings)
+        create_icon_btn(footer_frame, "📥", self.import_transactions)
+        create_icon_btn(footer_frame, "➕", self.open_add_transaction)
+        create_icon_btn(footer_frame, "🔄", self.veri_getir)
+
+    def create_price_row(self, label_text, initial_value, var_name, color):
+        row = tk.Frame(self.frame, bg=self.bg_color)
+        row.pack(fill="x", pady=4)
+        
+        tk.Label(row, text=label_text, bg=self.bg_color, fg=self.color_text_dim, font=self.font_label, anchor="w").pack(side="left")
+        
+        var = tk.StringVar(value=initial_value)
+        setattr(self, var_name, var)
+        tk.Label(row, textvariable=var, bg=self.bg_color, fg=color, font=self.font_value, anchor="e").pack(side="right")
 
     def toggle_autostart(self):
         self.asm.set_autostart(self.var_autostart.get())
@@ -493,15 +506,15 @@ class PiyasaWidget:
             # Piyasa kontrolü
             if self.is_market_closed():
                 def set_closed_ui():
-                    self.var_market_status.set("• Piyasa Kapalı")
+                    self.var_market_status.set("•")
                     self.lbl_market_status.config(fg=self.color_danger) # Kırmızı nokta
-                    self.var_time.set(f"{time.strftime('%H:%M')} (zZz)")
+                    self.var_time.set(f"Uyku ({time.strftime('%H:%M')})")
                 
                 self.root.after(0, set_closed_ui)
                 return # API isteği atma
 
             def set_open_ui():
-                self.var_market_status.set("• Piyasa Açık")
+                self.var_market_status.set("•")
                 self.lbl_market_status.config(fg=self.color_success) # Yeşil nokta
             
             self.root.after(0, set_open_ui)
@@ -534,9 +547,9 @@ class PiyasaWidget:
             self.root.after(0, lambda: self.var_time.set("Bağlantı Hatası"))
 
     def guncelle_arayuz(self, ons_g, gram_g, gram_a):
-        self.var_gumus_ons.set(f"Gümüş Ons: ${ons_g:.2f}")
-        self.var_gumus_tl.set(f"Gümüş TL : ₺{gram_g:.2f}")
-        self.var_altin_tl.set(f"Altın TL : ₺{gram_a:.0f}")
+        self.var_gumus_ons.set(f"${ons_g:.2f}")
+        self.var_gumus_tl.set(f"₺{gram_g:.2f}")
+        self.var_altin_tl.set(f"₺{gram_a:.0f}")
         current_time = time.strftime("%H:%M:%S")
         self.var_time.set(f"Son Güncelleme: {current_time}")
 
@@ -547,17 +560,17 @@ class PiyasaWidget:
             profit_tl = current_val - total_inv
             profit_pct = (profit_tl / total_inv) * 100 if total_inv > 0 else 0
             
-            self.var_portfolio.set(f"Varlık: ₺{current_val:,.0f} ({total_g:,.2f} Gr)")
+            self.var_portfolio.set(f"₺{current_val:,.0f}")
             
-            color = "#00ff41" if profit_tl >= 0 else "#ff4444"
-            self.var_profit.set(f"Kar: %{profit_pct:.1f} (₺{profit_tl:,.0f})")
+            sign = "+" if profit_tl >= 0 else ""
+            self.var_profit.set(f"{sign}%{profit_pct:.1f} ({sign}₺{profit_tl:,.0f})")
             
-            # Label rengini güncellemek zor olduğu için var_profit'i tutan label'ı bulup güncelleyebiliriz
-            # Ancak basitlik adına şimdilik statik beyaz bırakabiliriz veya frame içindeki label'ları tarayabiliriz.
-            # Şimdilik statik.
+            color = self.color_success if profit_tl >= 0 else self.color_danger
+            self.lbl_profit.config(fg=color)
         else:
-             self.var_portfolio.set("Varlık: ₺0")
-             self.var_profit.set("Kar: %0.0")
+             self.var_portfolio.set("₺0")
+             self.var_profit.set("%0.0 (₺0)")
+             self.lbl_profit.config(fg=self.color_text_dim)
 
     def open_add_transaction(self):
         # Güncel dolar kurunu bul
