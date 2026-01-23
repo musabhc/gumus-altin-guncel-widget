@@ -393,10 +393,12 @@ class PiyasaWidget:
         self.frame.pack(expand=True, fill="both")
         
         # Etiketler (Değişkenler)
+        self.var_market_status = tk.StringVar(value="Piyasa: ...")
         self.var_gumus_ons = tk.StringVar(value="Gümüş Ons: ...")
         self.var_gumus_tl = tk.StringVar(value="Gümüş TL : ...")
         self.var_altin_tl = tk.StringVar(value="Altın TL : ...")
         
+        tk.Label(self.frame, textvariable=self.var_market_status, bg=self.bg_color, fg="#00ccff", font=("Consolas", 10, "bold"), anchor="w").pack(fill="x", pady=(0, 5))
         tk.Label(self.frame, textvariable=self.var_gumus_ons, bg=self.bg_color, fg=self.text_color, font=style_font, anchor="w").pack(fill="x")
         tk.Label(self.frame, textvariable=self.var_gumus_tl, bg=self.bg_color, fg=self.text_color, font=style_font, anchor="w").pack(fill="x")
         tk.Label(self.frame, textvariable=self.var_altin_tl, bg=self.bg_color, fg="#ffd700", font=style_font, anchor="w").pack(fill="x") # Altın sarısı
@@ -464,8 +466,38 @@ class PiyasaWidget:
         else:
             messagebox.showinfo("Güncelleme", "Uygulama güncel!")
 
+    def is_market_closed(self):
+        """
+        Piyasa Kapalı mı kontrolü (Türkiye saati varsayımıyla):
+        Kapanış: Cumartesi 01:00
+        Açılış: Pazartesi 02:00
+        """
+        now = datetime.now()
+        weekday = now.weekday() # 0: Pzt, 6: Paz
+        hour = now.hour
+        
+        # Cumartesi (5)
+        if weekday == 5:
+            return hour >= 1
+        # Pazar (6)
+        if weekday == 6:
+            return True
+        # Pazartesi (0)
+        if weekday == 0:
+            return hour < 2
+            
+        return False
+
     def veri_getir(self):
         try:
+            # Piyasa kontrolü
+            if self.is_market_closed():
+                self.root.after(0, lambda: self.var_market_status.set("Piyasa: Kapalı"))
+                self.root.after(0, lambda: self.var_time.set(f"Son Kontrol: {time.strftime('%H:%M:%S')} (Uyku)"))
+                return # API isteği atma
+
+            self.root.after(0, lambda: self.var_market_status.set("Piyasa: Açık"))
+
             # XAGUSD=X hata verdiği için SI=F (Vadeli) geri dönüyoruz.
             tickers = yf.Tickers("SI=F GC=F TRY=X")
             
