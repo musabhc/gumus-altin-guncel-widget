@@ -501,6 +501,24 @@ class PiyasaWidget:
             
         return False
 
+    def save_last_data(self, data):
+        try:
+            filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "market_data.json")
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=4)
+        except Exception as e:
+            print(f"Veri kaydetme hatası: {e}")
+
+    def load_last_data(self):
+        try:
+            filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "market_data.json")
+            if os.path.exists(filepath):
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"Veri okuma hatası: {e}")
+        return None
+
     def veri_getir(self):
         try:
             # Piyasa kontrolü
@@ -508,7 +526,22 @@ class PiyasaWidget:
                 def set_closed_ui():
                     self.var_market_status.set("•")
                     self.lbl_market_status.config(fg=self.color_danger) # Kırmızı nokta
-                    self.var_time.set(f"Uyku ({time.strftime('%H:%M')})")
+                    
+                    # Kayıtlı son veriyi yükle
+                    last_data = self.load_last_data()
+                    if last_data:
+                        self.guncelle_arayuz(
+                            last_data.get("ons_gumus", 0),
+                            last_data.get("gram_gumus_tl", 0),
+                            last_data.get("gram_altin_tl", 0)
+                        )
+                        # Dolar kurunu da güncelle, portföy hesaplamaları için gerekebilir
+                        self.last_dolar_rate = last_data.get("dolar", 36.0)
+                        
+                        last_time = last_data.get("timestamp", "")
+                        self.var_time.set(f"Piyasa Kapalı (Son: {last_time})")
+                    else:
+                        self.var_time.set(f"Uyku ({time.strftime('%H:%M')})")
                 
                 self.root.after(0, set_closed_ui)
                 return # API isteği atma
@@ -539,6 +572,16 @@ class PiyasaWidget:
             # Hesaplamalar
             gram_gumus_tl = (ons_gumus * dolar) / 31.1035
             gram_altin_tl = (ons_altin * dolar) / 31.1035
+            
+            # Verileri kaydet
+            market_data = {
+                "ons_gumus": ons_gumus,
+                "gram_gumus_tl": gram_gumus_tl,
+                "gram_altin_tl": gram_altin_tl,
+                "dolar": dolar,
+                "timestamp": time.strftime("%d.%m %H:%M")
+            }
+            self.save_last_data(market_data)
             
             # UI Güncelleme (Main Thread'e güvenli geçiş için)
             self.root.after(0, lambda: self.guncelle_arayuz(ons_gumus, gram_gumus_tl, gram_altin_tl))
