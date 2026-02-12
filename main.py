@@ -379,6 +379,24 @@ class PiyasaWidget:
         self.menu = tk.Menu(self.root, tearoff=0)
         self.menu.add_command(label="Kapat", command=self.kapat)
         self.root.bind("<Button-3>", self.show_menu)
+
+        # Ayarlar Menüsü (çark simgesi)
+        self.var_autostart = tk.BooleanVar(value=self.asm.is_enabled())
+        self.var_topmost = tk.BooleanVar(value=True)
+        self.settings_menu = tk.Menu(self.root, tearoff=0)
+        self.settings_menu.add_checkbutton(
+            label="Windows ile başlat",
+            variable=self.var_autostart,
+            command=self.toggle_autostart
+        )
+        self.settings_menu.add_checkbutton(
+            label="Her zaman üstte",
+            variable=self.var_topmost,
+            command=self.toggle_topmost
+        )
+        self.settings_menu.add_command(label="Güncellemeleri kontrol et", command=self.check_updates)
+        self.settings_menu.add_separator()
+        self.settings_menu.add_command(label="Kapat", command=self.kapat)
         
         # İlk Veri Çekme
         self.update_thread = threading.Thread(target=self.veri_dongusu, daemon=True)
@@ -466,6 +484,9 @@ class PiyasaWidget:
 
     def toggle_autostart(self):
         self.asm.set_autostart(self.var_autostart.get())
+
+    def toggle_topmost(self):
+        self.root.attributes("-topmost", self.var_topmost.get())
         
     def check_updates(self):
         has_update, new_version, url = self.um.check_for_updates()
@@ -659,13 +680,11 @@ class PiyasaWidget:
                 self.veri_getir()
 
     def open_settings(self, event=None):
-        # Menüyü butonun olduğu yerde aç
-        try:
-            x = self.root.winfo_pointerx() # Mouse konumu
-            y = self.root.winfo_pointery()
-            self.settings_menu.post(x, y)
-        except:
-            pass
+        # Menüyü fare konumunda aç
+        x = self.root.winfo_pointerx()
+        y = self.root.winfo_pointery()
+        self.settings_menu.tk_popup(x, y)
+        self.settings_menu.grab_release()
         
     def make_toolwindow(self):
         # Windows API kullanarak pencereyi Taskbar'dan ve Alt-Tab'dan gizleme
