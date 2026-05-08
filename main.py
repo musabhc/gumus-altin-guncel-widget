@@ -1,4 +1,5 @@
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk
 import yfinance as yf
 import threading
@@ -237,7 +238,7 @@ class PortfolioManagerDialog(tk.Toplevel):
                         fieldbackground="#3d3d3d", 
                         borderwidth=0,
                         rowheight=25,
-                        font=("Segoe UI", 9))
+                        font=self.font_nav_arrow)
         
         style.configure("Treeview.Heading", 
                         background="#252526", 
@@ -483,12 +484,36 @@ class PiyasaWidget:
         self.update_thread.start()
         
     def setup_ui(self):
-        # --- Premium V2 Stil Tanımları ---
-        self.font_header = ("Segoe UI", 9)
-        self.font_label = ("Segoe UI Semibold", 9) 
-        self.font_value = ("Segoe UI", 11)
-        self.font_portfolio = ("Segoe UI", 20, "bold")
-        self.font_profit = ("Segoe UI", 10)
+        # --- Premium V2 Stil Tanımları (Dinamik Fontlar) ---
+        self.base_fonts = {
+            "header": 9,
+            "label": 9,
+            "value": 11,
+            "portfolio": 20,
+            "profit": 10,
+            "market_status": 14,
+            "chart_text": 10,
+            "chart_title": 8,
+            "chart_tick": 6,
+            "chart_val": 7,
+            "stats_title": 8,
+            "stats_val": 7
+        }
+        
+        self.font_header = tkfont.Font(family="Segoe UI", size=self.base_fonts["header"])
+        self.font_label = tkfont.Font(family="Segoe UI Semibold", size=self.base_fonts["label"])
+        self.font_value = tkfont.Font(family="Segoe UI", size=self.base_fonts["value"])
+        self.font_portfolio = tkfont.Font(family="Segoe UI", size=self.base_fonts["portfolio"], weight="bold")
+        self.font_profit = tkfont.Font(family="Segoe UI", size=self.base_fonts["profit"])
+        
+        # Diğer arayüz elemanları için ek fontlar
+        self.font_market_status = tkfont.Font(family="Arial", size=self.base_fonts["market_status"])
+        self.font_nav_arrow = tkfont.Font(family="Segoe UI", size=9)
+        self.font_icon = tkfont.Font(family="Segoe UI Emoji", size=10)
+        
+        # Responsive tasarım için takip
+        self.last_width = 260
+        self.root.bind("<Configure>", self.on_resize)
         
         # Renk Paleti (Ultra Dark)
         self.bg_color = "#0f0f0f"
@@ -511,14 +536,14 @@ class PiyasaWidget:
         header_frame.pack(fill="x", pady=(0, 10))
         
         self.var_market_status = tk.StringVar(value="•") 
-        self.lbl_market_status = tk.Label(header_frame, textvariable=self.var_market_status, bg=self.bg_color, fg=self.color_text_dim, font=("Arial", 14), anchor="w")
+        self.lbl_market_status = tk.Label(header_frame, textvariable=self.var_market_status, bg=self.bg_color, fg=self.color_text_dim, font=self.font_market_status, anchor="w")
         self.lbl_market_status.pack(side="left")
         
         # Navigasyon çerçevesi
         nav_frame = tk.Frame(header_frame, bg=self.bg_color)
         nav_frame.pack(side="right")
         
-        self.btn_prev = tk.Label(nav_frame, text="◀", bg=self.bg_color, fg="#333333", font=("Segoe UI", 9), cursor="hand2")
+        self.btn_prev = tk.Label(nav_frame, text="◀", bg=self.bg_color, fg="#333333", font=self.font_nav_arrow, cursor="hand2")
         self.btn_prev.pack(side="left", padx=(0, 4))
         self.btn_prev.bind("<Button-1>", lambda e: self.prev_page())
         self.btn_prev.bind("<Enter>", lambda e: self.btn_prev.config(fg="#888888"))
@@ -527,7 +552,7 @@ class PiyasaWidget:
         self.var_time = tk.StringVar(value="--:--")
         tk.Label(nav_frame, textvariable=self.var_time, bg=self.bg_color, fg=self.color_text_dim, font=self.font_header, anchor="center").pack(side="left")
         
-        self.btn_next = tk.Label(nav_frame, text="▶", bg=self.bg_color, fg="#333333", font=("Segoe UI", 9), cursor="hand2")
+        self.btn_next = tk.Label(nav_frame, text="▶", bg=self.bg_color, fg="#333333", font=self.font_nav_arrow, cursor="hand2")
         self.btn_next.pack(side="left", padx=(4, 0))
         self.btn_next.bind("<Button-1>", lambda e: self.next_page())
         self.btn_next.bind("<Enter>", lambda e: self.btn_next.config(fg="#888888"))
@@ -538,7 +563,7 @@ class PiyasaWidget:
         footer_frame.pack(side="bottom", fill="x", pady=(10, 0))
         
         def create_icon_btn(parent, text, command):
-            lbl = tk.Label(parent, text=text, bg=self.bg_color, fg="#333333", font=("Segoe UI Emoji", 10), cursor="hand2")
+            lbl = tk.Label(parent, text=text, bg=self.bg_color, fg="#333333", font=self.font_icon, cursor="hand2")
             lbl.pack(side="right", padx=(10, 0))
             lbl.bind("<Button-1>", lambda e: command())
             lbl.bind("<Enter>", lambda e: lbl.config(fg="#888888"))
@@ -560,7 +585,7 @@ class PiyasaWidget:
         portfolio_frame = tk.Frame(self.page_main, bg=self.bg_color)
         portfolio_frame.pack(fill="x", pady=(0, 20))
         
-        tk.Label(portfolio_frame, text="TOPLAM VARLIK", bg=self.bg_color, fg=self.color_text_dim, font=("Segoe UI", 8), anchor="w").pack(fill="x")
+        tk.Label(portfolio_frame, text="TOPLAM VARLIK", bg=self.bg_color, fg=self.color_text_dim, font=self.font_header, anchor="w").pack(fill="x")
         
         self.var_portfolio = tk.StringVar(value="₺...")
         tk.Label(portfolio_frame, textvariable=self.var_portfolio, bg=self.bg_color, fg=self.color_text_main, font=self.font_portfolio, anchor="w").pack(fill="x")
@@ -584,6 +609,14 @@ class PiyasaWidget:
         # Sayfa listesi ve ilk sayfa
         self.pages = [self.page_main, self.page_chart, self.page_stats]
         self.show_page(0)
+
+        # --- Yeniden Boyutlandırma (Resize Grip) ---
+        self.grip = tk.Label(self.root, text="◢", bg=self.bg_color, fg="#333333", font=("Arial", 8), cursor="sizing")
+        self.grip.place(relx=1.0, rely=1.0, anchor="se")
+        self.grip.bind("<ButtonPress-1>", self.start_resize)
+        self.grip.bind("<B1-Motion>", self.do_resize)
+        self.grip.bind("<Enter>", lambda e: self.grip.config(fg="#666666"))
+        self.grip.bind("<Leave>", lambda e: self.grip.config(fg="#333333"))
 
     def create_price_row(self, label_text, initial_value, var_name, color, parent=None):
         if parent is None:
@@ -663,8 +696,17 @@ class PiyasaWidget:
             
             cw = self.chart_canvas.winfo_width()
             ch = self.chart_canvas.winfo_height()
+            cw = self.chart_canvas.winfo_width()
+            ch = self.chart_canvas.winfo_height()
             if cw < 10 or ch < 10:
                 cw, ch = 230, 170
+            
+            # Dinamik font boyutu hesaplama
+            scale = max(1.0, min(1.5, cw / 230.0))
+            f_title = int(8 * scale)
+            f_tick = int(6 * scale)
+            f_val = int(7 * scale)
+            f_no_data = int(10 * scale)
             
             days = self.chart_period.get()
             if days == 0:
@@ -673,7 +715,7 @@ class PiyasaWidget:
                 data = self.history_db.get_history(days=days)
             
             if not data:
-                self.chart_canvas.create_text(cw//2, ch//2, text="Veri yok", fill="#666666", font=("Segoe UI", 10))
+                self.chart_canvas.create_text(cw//2, ch//2, text="Veri yok", fill="#666666", font=("Segoe UI", f_no_data))
                 return
             
             selected = self.chart_var.get()
@@ -686,7 +728,7 @@ class PiyasaWidget:
             timestamps = [row[0] for row in data]
             
             if not values or all(v is None for v in values):
-                self.chart_canvas.create_text(cw//2, ch//2, text="Veri yok", fill="#666666", font=("Segoe UI", 10))
+                self.chart_canvas.create_text(cw//2, ch//2, text="Veri yok", fill="#666666", font=("Segoe UI", f_no_data))
                 return
             
             # Grafik alanı (padding)
@@ -699,7 +741,7 @@ class PiyasaWidget:
             val_range = max_v - min_v if max_v != min_v else 1
             
             # Başlık
-            self.chart_canvas.create_text(cw//2, 10, text=title, fill="#888888", font=("Segoe UI", 8))
+            self.chart_canvas.create_text(cw//2, 10, text=title, fill="#888888", font=("Segoe UI", f_title))
             
             # Grid çizgileri
             for i in range(5):
@@ -707,7 +749,7 @@ class PiyasaWidget:
                 self.chart_canvas.create_line(pad_l, y, cw - pad_r, y, fill="#1a1a1a")
                 v = max_v - (val_range * i / 4)
                 fmt = f"{v:,.0f}" if v > 999 else f"{v:.2f}"
-                self.chart_canvas.create_text(pad_l - 4, y, text=fmt, fill="#444444", font=("Segoe UI", 6), anchor="e")
+                self.chart_canvas.create_text(pad_l - 4, y, text=fmt, fill="#444444", font=("Segoe UI", f_tick), anchor="e")
             
             # Veri noktalarını canvas koordinatlarına çevir
             n = len(values)
@@ -743,14 +785,14 @@ class PiyasaWidget:
                         label = dt.strftime("%d/%m")
                 except:
                     label = str(ts)[:5]
-                self.chart_canvas.create_text(x, ch - 10, text=label, fill="#444444", font=("Segoe UI", 6))
+                self.chart_canvas.create_text(x, ch - 10, text=label, fill="#444444", font=("Segoe UI", f_tick))
             
             # Son değer etiketi
             last_x, last_y = points[-1]
             last_v = values[-1]
             fmt_v = f"{last_v:,.0f}" if last_v > 999 else f"{last_v:.2f}"
             self.chart_canvas.create_oval(last_x-3, last_y-3, last_x+3, last_y+3, fill=color, outline="")
-            self.chart_canvas.create_text(last_x, last_y - 10, text=fmt_v, fill=color, font=("Segoe UI", 7, "bold"))
+            self.chart_canvas.create_text(last_x, last_y - 10, text=fmt_v, fill=color, font=("Segoe UI", f_val, "bold"))
             
         except Exception as e:
             print(f"Chart error: {e}")
@@ -1068,6 +1110,47 @@ class PiyasaWidget:
         while True:
             self.veri_getir()
             time.sleep(self.refresh_rate)
+
+
+    # --- Yeniden Boyutlandırma Mantığı ---
+    def start_resize(self, event):
+        self.resize_start_x = event.x_root
+        self.resize_start_y = event.y_root
+        self.start_width = self.root.winfo_width()
+        self.start_height = self.root.winfo_height()
+
+    def do_resize(self, event):
+        deltax = event.x_root - self.resize_start_x
+        deltay = event.y_root - self.resize_start_y
+        
+        new_width = max(260, self.start_width + deltax)
+        new_height = max(300, self.start_height + deltay)
+        
+        self.root.geometry(f"{new_width}x{new_height}")
+
+    def on_resize(self, event):
+        if event.widget == self.root:
+            w = event.width
+            if abs(w - self.last_width) > 20: # Sadece belirgin boyut değişimlerinde ölçekle
+                self.last_width = w
+                scale = max(1.0, w / 260.0)
+                
+                # Sınırlı ölçekleme (çok büyümesin diye scale factor max 1.5)
+                scale = min(1.5, scale)
+                
+                # Fontları güncelle
+                self.font_header.config(size=int(self.base_fonts["header"] * scale))
+                self.font_label.config(size=int(self.base_fonts["label"] * scale))
+                self.font_value.config(size=int(self.base_fonts["value"] * scale))
+                self.font_portfolio.config(size=int(self.base_fonts["portfolio"] * scale))
+                self.font_profit.config(size=int(self.base_fonts["profit"] * scale))
+                self.font_market_status.config(size=int(self.base_fonts["market_status"] * scale))
+                self.font_nav_arrow.config(size=int(9 * scale))
+                self.font_icon.config(size=int(10 * scale))
+                
+                # Grafik sayfasındaysa güncel boyutlara göre yeniden çiz
+                if hasattr(self, 'current_page') and self.current_page == 1:
+                    self.root.after(100, self._update_chart)
 
     # --- Sürükleme Mantığı ---
     def start_move(self, event):
