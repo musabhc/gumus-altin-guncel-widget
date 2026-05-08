@@ -5,13 +5,19 @@ import threading
 import time
 import sys
 import json
+import sqlite3
 import os
 import winreg
 import ctypes
 import requests
 import webbrowser
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
+import matplotlib
+matplotlib.use('Agg')
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import matplotlib.dates
 from tkinter import messagebox, filedialog
 
 # Configuration
@@ -50,6 +56,83 @@ class TransactionManager:
         total_investment = sum(t['total_tl'] for t in self.transactions)
         total_gumus = sum(t['amount_g'] for t in self.transactions)
         return total_investment, total_gumus
+
+
+class MarketHistoryDB:
+    def __init__(self, db_name="market_history.db"):
+        self.db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), db_name)
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._create_table()
+
+    def _create_table(self):
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS market_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                ons_gumus REAL,
+                gram_gumus_tl REAL,
+                gram_altin_tl REAL,
+                dolar REAL
+            )
+        """)
+        self.conn.commit()
+
+    def insert(self, ons_gumus, gram_gumus_tl, gram_altin_tl, dolar):
+        self.conn.execute(
+            "INSERT INTO market_history (timestamp, ons_gumus, gram_gumus_tl, gram_altin_tl, dolar) VALUES (?, ?, ?, ?, ?)",
+            (datetime.now().isoformat(), ons_gumus, gram_gumus_tl, gram_altin_tl, dolar)
+        )
+        self.conn.commit()
+
+    def get_history(self, days=7):
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        cursor = self.conn.execute(
+            "SELECT timestamp, ons_gumus, gram_gumus_tl, gram_altin_tl, dolar FROM market_history WHERE timestamp >= ? ORDER BY timestamp",
+            (cutoff,)
+        )
+        return cursor.fetchall()
+
+    def get_all_history(self):
+        cursor = self.conn.execute(
+            "SELECT timestamp, ons_gumus, gram_gumus_tl, gram_altin_tl, dolar FROM market_history ORDER BY timestamp"
+        )
+        return cursor.fetchall()
+
+    def get_stats(self, days=None):
+        if days:
+            cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+            cursor = self.conn.execute("""
+                SELECT MIN(gram_gumus_tl), MAX(gram_gumus_tl), AVG(gram_gumus_tl),
+                       MIN(gram_altin_tl), MAX(gram_altin_tl), AVG(gram_altin_tl),
+                       MIN(dolar), MAX(dolar), AVG(dolar), COUNT(*)
+                FROM market_history WHERE timestamp >= ?
+            """, (cutoff,))
+        else:
+            cursor = self.conn.execute("""
+                SELECT MIN(gram_gumus_tl), MAX(gram_gumus_tl), AVG(gram_gumus_tl),
+                       MIN(gram_altin_tl), MAX(gram_altin_tl), AVG(gram_altin_tl),
+                       MIN(dolar), MAX(dolar), AVG(dolar), COUNT(*)
+                FROM market_history
+            """)
+        return cursor.fetchone()
+
+    def get_first_last(self, days=None):
+        if days:
+            cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+            first = self.conn.execute(
+                "SELECT gram_gumus_tl, gram_altin_tl, dolar FROM market_history WHERE timestamp >= ? ORDER BY timestamp ASC LIMIT 1", (cutoff,)
+            ).fetchone()
+            last = self.conn.execute(
+                "SELECT gram_gumus_tl, gram_altin_tl, dolar FROM market_history WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT 1", (cutoff,)
+            ).fetchone()
+        else:
+            first = self.conn.execute(
+                "SELECT gram_gumus_tl, gram_altin_tl, dolar FROM market_history ORDER BY timestamp ASC LIMIT 1"
+            ).fetchone()
+            last = self.conn.execute(
+                "SELECT gram_gumus_tl, gram_altin_tl, dolar FROM market_history ORDER BY timestamp DESC LIMIT 1"
+            ).fetchone()
+        return first, last
 
 class AutoStartManager:
     def __init__(self, app_name="PiyasaWidget"):
@@ -367,6 +450,8 @@ class PiyasaWidget:
         self.tm = TransactionManager()
         self.asm = AutoStartManager()
         self.um = UpdateManager(VERSION, GITHUB_REPO)
+        self.history_db = MarketHistoryDB()
+        self.current_page = 0
         
         # UI Elemanları
         self.setup_ui()
@@ -407,55 +492,53 @@ class PiyasaWidget:
         self.font_header = ("Segoe UI", 9)
         self.font_label = ("Segoe UI Semibold", 9) 
         self.font_value = ("Segoe UI", 11)
-        self.font_portfolio = ("Segoe UI", 20, "bold") # Büyük Varlık (Reduced to 20)
+        self.font_portfolio = ("Segoe UI", 20, "bold")
         self.font_profit = ("Segoe UI", 10)
         
         # Renk Paleti (Ultra Dark)
-        self.bg_color = "#0f0f0f" # Deep Black override
+        self.bg_color = "#0f0f0f"
         self.root.configure(bg=self.bg_color)
         
         self.color_card = "#141414"
         self.color_text_main = "#ffffff"
         self.color_text_dim = "#666666"
         self.color_accent = "#2196f3"
-        self.color_success = "#2ecc71" # Emerald
-        self.color_danger = "#e74c3c" # Alizarin
-        self.color_gold = "#d4af37" # Rich Gold
+        self.color_success = "#2ecc71"
+        self.color_danger = "#e74c3c"
+        self.color_gold = "#d4af37"
         
         # Ana Konteyner
         self.frame = tk.Frame(self.root, bg=self.bg_color, padx=15, pady=15)
         self.frame.pack(fill="both", expand=True)
         
-        # 1. ÜST HEADER (Durum Noktası + Saat)
+        # 1. ÜST HEADER (Durum Noktası + Navigasyon Okları + Saat)
         header_frame = tk.Frame(self.frame, bg=self.bg_color)
-        header_frame.pack(fill="x", pady=(0, 15))
+        header_frame.pack(fill="x", pady=(0, 10))
         
         self.var_market_status = tk.StringVar(value="•") 
-        self.lbl_market_status = tk.Label(header_frame, textvariable=self.var_market_status, bg=self.bg_color, fg=self.color_text_dim, font=("Arial", 14), anchor="w") # Nokta için Arial
+        self.lbl_market_status = tk.Label(header_frame, textvariable=self.var_market_status, bg=self.bg_color, fg=self.color_text_dim, font=("Arial", 14), anchor="w")
         self.lbl_market_status.pack(side="left")
         
+        # Navigasyon çerçevesi
+        nav_frame = tk.Frame(header_frame, bg=self.bg_color)
+        nav_frame.pack(side="right")
+        
+        self.btn_prev = tk.Label(nav_frame, text="◀", bg=self.bg_color, fg="#333333", font=("Segoe UI", 9), cursor="hand2")
+        self.btn_prev.pack(side="left", padx=(0, 4))
+        self.btn_prev.bind("<Button-1>", lambda e: self.prev_page())
+        self.btn_prev.bind("<Enter>", lambda e: self.btn_prev.config(fg="#888888"))
+        self.btn_prev.bind("<Leave>", lambda e: self._update_arrow_colors())
+        
         self.var_time = tk.StringVar(value="--:--")
-        tk.Label(header_frame, textvariable=self.var_time, bg=self.bg_color, fg=self.color_text_dim, font=self.font_header, anchor="e").pack(side="right", pady=4) # Hizalama düzeltmesi
-
-        # 2. PORTFÖY (Merkezi, Büyük)
-        portfolio_frame = tk.Frame(self.frame, bg=self.bg_color)
-        portfolio_frame.pack(fill="x", pady=(0, 20))
+        tk.Label(nav_frame, textvariable=self.var_time, bg=self.bg_color, fg=self.color_text_dim, font=self.font_header, anchor="center").pack(side="left")
         
-        tk.Label(portfolio_frame, text="TOPLAM VARLIK", bg=self.bg_color, fg=self.color_text_dim, font=("Segoe UI", 8), anchor="w").pack(fill="x")
-        
-        self.var_portfolio = tk.StringVar(value="₺...")
-        tk.Label(portfolio_frame, textvariable=self.var_portfolio, bg=self.bg_color, fg=self.color_text_main, font=self.font_portfolio, anchor="w").pack(fill="x")
-        
-        self.var_profit = tk.StringVar(value="...")
-        self.lbl_profit = tk.Label(portfolio_frame, textvariable=self.var_profit, bg=self.bg_color, fg=self.color_text_dim, font=self.font_profit, anchor="w")
-        self.lbl_profit.pack(fill="x")
+        self.btn_next = tk.Label(nav_frame, text="▶", bg=self.bg_color, fg="#333333", font=("Segoe UI", 9), cursor="hand2")
+        self.btn_next.pack(side="left", padx=(4, 0))
+        self.btn_next.bind("<Button-1>", lambda e: self.next_page())
+        self.btn_next.bind("<Enter>", lambda e: self.btn_next.config(fg="#888888"))
+        self.btn_next.bind("<Leave>", lambda e: self._update_arrow_colors())
 
-        # 3. PİYASA LİSTESİ
-        self.create_price_row("Gümüş ONS", "$...", "var_gumus_ons", self.color_text_main)
-        self.create_price_row("Gümüş TL", "₺...", "var_gumus_tl", self.color_text_main)
-        self.create_price_row("Altın TL", "₺...", "var_altin_tl", self.color_gold)
-
-        # 4. FOOTER (Gizli Butonlar)
+        # 4. FOOTER (Gizli Butonlar) - footer önce pack edilir (side=bottom)
         footer_frame = tk.Frame(self.frame, bg=self.bg_color)
         footer_frame.pack(side="bottom", fill="x", pady=(10, 0))
         
@@ -472,8 +555,45 @@ class PiyasaWidget:
         create_icon_btn(footer_frame, "➕", self.open_add_transaction)
         create_icon_btn(footer_frame, "🔄", self.veri_getir)
 
-    def create_price_row(self, label_text, initial_value, var_name, color):
-        row = tk.Frame(self.frame, bg=self.bg_color)
+        # 2. İÇERİK KONTEYNERİ (Sayfa bazlı geçiş)
+        self.content_container = tk.Frame(self.frame, bg=self.bg_color)
+        self.content_container.pack(fill="both", expand=True)
+        
+        # --- Sayfa 0: Ana Sayfa ---
+        self.page_main = tk.Frame(self.content_container, bg=self.bg_color)
+        
+        portfolio_frame = tk.Frame(self.page_main, bg=self.bg_color)
+        portfolio_frame.pack(fill="x", pady=(0, 20))
+        
+        tk.Label(portfolio_frame, text="TOPLAM VARLIK", bg=self.bg_color, fg=self.color_text_dim, font=("Segoe UI", 8), anchor="w").pack(fill="x")
+        
+        self.var_portfolio = tk.StringVar(value="₺...")
+        tk.Label(portfolio_frame, textvariable=self.var_portfolio, bg=self.bg_color, fg=self.color_text_main, font=self.font_portfolio, anchor="w").pack(fill="x")
+        
+        self.var_profit = tk.StringVar(value="...")
+        self.lbl_profit = tk.Label(portfolio_frame, textvariable=self.var_profit, bg=self.bg_color, fg=self.color_text_dim, font=self.font_profit, anchor="w")
+        self.lbl_profit.pack(fill="x")
+
+        self.create_price_row("Gümüş ONS", "$...", "var_gumus_ons", self.color_text_main, self.page_main)
+        self.create_price_row("Gümüş TL", "₺...", "var_gumus_tl", self.color_text_main, self.page_main)
+        self.create_price_row("Altın TL", "₺...", "var_altin_tl", self.color_gold, self.page_main)
+
+        # --- Sayfa 1: Grafik Sayfası ---
+        self.page_chart = tk.Frame(self.content_container, bg=self.bg_color)
+        self._build_chart_page()
+        
+        # --- Sayfa 2: İstatistik Sayfası ---
+        self.page_stats = tk.Frame(self.content_container, bg=self.bg_color)
+        self._build_stats_page()
+        
+        # Sayfa listesi ve ilk sayfa
+        self.pages = [self.page_main, self.page_chart, self.page_stats]
+        self.show_page(0)
+
+    def create_price_row(self, label_text, initial_value, var_name, color, parent=None):
+        if parent is None:
+            parent = self.frame
+        row = tk.Frame(parent, bg=self.bg_color)
         row.pack(fill="x", pady=4)
         
         tk.Label(row, text=label_text, bg=self.bg_color, fg=self.color_text_dim, font=self.font_label, anchor="w").pack(side="left")
@@ -481,6 +601,209 @@ class PiyasaWidget:
         var = tk.StringVar(value=initial_value)
         setattr(self, var_name, var)
         tk.Label(row, textvariable=var, bg=self.bg_color, fg=color, font=self.font_value, anchor="e").pack(side="right")
+
+    # --- Sayfa Navigasyon Sistemi ---
+    def show_page(self, index):
+        for p in self.pages:
+            p.pack_forget()
+        self.pages[index].pack(fill="both", expand=True)
+        self.current_page = index
+        self._update_arrow_colors()
+        # Sayfa değiştiğinde içeriği güncelle
+        if index == 1:
+            self._update_chart()
+        elif index == 2:
+            self._update_stats()
+    
+    def next_page(self):
+        if self.current_page < len(self.pages) - 1:
+            self.show_page(self.current_page + 1)
+    
+    def prev_page(self):
+        if self.current_page > 0:
+            self.show_page(self.current_page - 1)
+    
+    def _update_arrow_colors(self):
+        self.btn_prev.config(fg="#888888" if self.current_page > 0 else "#222222")
+        self.btn_next.config(fg="#888888" if self.current_page < len(self.pages) - 1 else "#222222")
+
+    # --- Grafik Sayfası ---
+    def _build_chart_page(self):
+        # Veri seçici butonlar
+        selector_frame = tk.Frame(self.page_chart, bg=self.bg_color)
+        selector_frame.pack(fill="x", pady=(0, 2))
+        
+        self.chart_var = tk.StringVar(value="gumus_tl")
+        self.chart_period = tk.IntVar(value=7)
+        
+        btn_style = {"bg": "#1a1a1a", "fg": "#888888", "font": ("Segoe UI", 7), 
+                     "relief": "flat", "bd": 0, "cursor": "hand2", 
+                     "activebackground": "#252525", "activeforeground": "#ffffff"}
+        
+        for text, val in [("Gümüş", "gumus_tl"), ("Altın", "altin_tl"), ("Dolar", "dolar")]:
+            rb = tk.Radiobutton(selector_frame, text=text, variable=self.chart_var, value=val,
+                               bg=self.bg_color, fg="#888888", selectcolor="#1a1a1a",
+                               activebackground=self.bg_color, activeforeground="#ffffff",
+                               font=("Segoe UI", 7), indicatoron=0, padx=6, pady=1,
+                               command=self._update_chart)
+            rb.pack(side="left", padx=1)
+        
+        # Periyot seçici
+        for text, val in [("7G", 7), ("30G", 30), ("Tümü", 0)]:
+            rb = tk.Radiobutton(selector_frame, text=text, variable=self.chart_period, value=val,
+                               bg=self.bg_color, fg="#555555", selectcolor="#1a1a1a",
+                               activebackground=self.bg_color, activeforeground="#ffffff",
+                               font=("Segoe UI", 7), indicatoron=0, padx=4, pady=1,
+                               command=self._update_chart)
+            rb.pack(side="right", padx=1)
+        
+        # Matplotlib Figure
+        self.fig = Figure(figsize=(2.3, 1.7), dpi=100, facecolor=self.bg_color)
+        self.ax = self.fig.add_subplot(111)
+        self.fig.subplots_adjust(left=0.18, right=0.95, top=0.92, bottom=0.18)
+        
+        self.chart_canvas = FigureCanvasTkAgg(self.fig, master=self.page_chart)
+        self.chart_canvas.get_tk_widget().pack(fill="both", expand=True)
+
+    def _update_chart(self):
+        try:
+            days = self.chart_period.get()
+            if days == 0:
+                data = self.history_db.get_all_history()
+            else:
+                data = self.history_db.get_history(days=days)
+            
+            if not data:
+                self.ax.clear()
+                self.ax.set_facecolor(self.bg_color)
+                self.ax.text(0.5, 0.5, "Veri yok", color="#666666", ha='center', va='center', transform=self.ax.transAxes, fontsize=10)
+                self.ax.tick_params(colors="#333333")
+                self.chart_canvas.draw()
+                return
+            
+            selected = self.chart_var.get()
+            col_map = {"gumus_tl": (2, "Gümüş TL/g", self.color_accent), 
+                       "altin_tl": (3, "Altın TL/g", self.color_gold), 
+                       "dolar": (4, "Dolar", self.color_success)}
+            col_idx, title, color = col_map[selected]
+            
+            timestamps = [datetime.fromisoformat(row[0]) for row in data]
+            values = [row[col_idx] for row in data]
+            
+            self.ax.clear()
+            self.ax.set_facecolor(self.bg_color)
+            self.ax.plot(timestamps, values, color=color, linewidth=1.2)
+            self.ax.fill_between(timestamps, values, alpha=0.1, color=color)
+            
+            self.ax.set_title(title, color="#888888", fontsize=8, pad=4)
+            self.ax.tick_params(colors="#444444", labelsize=6)
+            self.ax.spines['top'].set_visible(False)
+            self.ax.spines['right'].set_visible(False)
+            self.ax.spines['bottom'].set_color("#222222")
+            self.ax.spines['left'].set_color("#222222")
+            self.ax.yaxis.label.set_color("#666666")
+            
+            # X ekseni tarih formatı
+            if len(timestamps) > 1:
+                span = (timestamps[-1] - timestamps[0]).days
+                if span <= 2:
+                    self.ax.xaxis.set_major_formatter(matplotlib.dates.DateFormatter('%H:%M'))
+                else:
+                    self.ax.xaxis.set_major_formatter(matplotlib.dates.DateFormatter('%d/%m'))
+                self.fig.autofmt_xdate(rotation=30)
+            
+            self.ax.grid(True, alpha=0.1, color="#333333")
+            self.chart_canvas.draw()
+        except Exception as e:
+            print(f"Chart error: {e}")
+
+    # --- İstatistik Sayfası ---
+    def _build_stats_page(self):
+        # Periyot seçici
+        period_frame = tk.Frame(self.page_stats, bg=self.bg_color)
+        period_frame.pack(fill="x", pady=(0, 8))
+        
+        self.stats_period = tk.IntVar(value=7)
+        
+        for text, val in [("7 Gün", 7), ("30 Gün", 30), ("Tümü", 0)]:
+            rb = tk.Radiobutton(period_frame, text=text, variable=self.stats_period, value=val,
+                               bg=self.bg_color, fg="#888888", selectcolor="#1a1a1a",
+                               activebackground=self.bg_color, activeforeground="#ffffff",
+                               font=("Segoe UI", 7), indicatoron=0, padx=6, pady=2,
+                               command=self._update_stats)
+            rb.pack(side="left", padx=2)
+        
+        # İstatistik satırları
+        self.stats_frame = tk.Frame(self.page_stats, bg=self.bg_color)
+        self.stats_frame.pack(fill="both", expand=True)
+        
+        self.stats_labels = {}
+        for key, name, color in [("gumus", "Gümüş TL/g", self.color_accent), 
+                                  ("altin", "Altın TL/g", self.color_gold),
+                                  ("dolar", "Dolar", self.color_success)]:
+            section = tk.Frame(self.stats_frame, bg=self.bg_color)
+            section.pack(fill="x", pady=4)
+            
+            tk.Label(section, text=name, bg=self.bg_color, fg=color, font=("Segoe UI Semibold", 8)).pack(anchor="w")
+            
+            row = tk.Frame(section, bg=self.bg_color)
+            row.pack(fill="x")
+            
+            self.stats_labels[f"{key}_min"] = tk.Label(row, text="Min: --", bg=self.bg_color, fg="#666666", font=("Segoe UI", 7))
+            self.stats_labels[f"{key}_min"].pack(side="left", expand=True)
+            
+            self.stats_labels[f"{key}_max"] = tk.Label(row, text="Max: --", bg=self.bg_color, fg="#666666", font=("Segoe UI", 7))
+            self.stats_labels[f"{key}_max"].pack(side="left", expand=True)
+            
+            row2 = tk.Frame(section, bg=self.bg_color)
+            row2.pack(fill="x")
+            
+            self.stats_labels[f"{key}_avg"] = tk.Label(row2, text="Ort: --", bg=self.bg_color, fg="#666666", font=("Segoe UI", 7))
+            self.stats_labels[f"{key}_avg"].pack(side="left", expand=True)
+            
+            self.stats_labels[f"{key}_chg"] = tk.Label(row2, text="Δ: --", bg=self.bg_color, fg="#666666", font=("Segoe UI", 7))
+            self.stats_labels[f"{key}_chg"].pack(side="left", expand=True)
+
+    def _update_stats(self):
+        try:
+            days = self.stats_period.get()
+            days_param = days if days > 0 else None
+            
+            stats = self.history_db.get_stats(days=days_param)
+            first_last = self.history_db.get_first_last(days=days_param)
+            
+            if not stats or stats[9] == 0:  # count == 0
+                for key in self.stats_labels:
+                    self.stats_labels[key].config(text="Veri yok")
+                return
+            
+            # gumus: indices 0,1,2  altin: 3,4,5  dolar: 6,7,8
+            items = [("gumus", 0, "₺"), ("altin", 3, "₺"), ("dolar", 6, "")]
+            for key, offset, prefix in items:
+                mn, mx, avg = stats[offset], stats[offset+1], stats[offset+2]
+                
+                if key == "altin":
+                    self.stats_labels[f"{key}_min"].config(text=f"Min: {prefix}{mn:,.0f}")
+                    self.stats_labels[f"{key}_max"].config(text=f"Max: {prefix}{mx:,.0f}")
+                    self.stats_labels[f"{key}_avg"].config(text=f"Ort: {prefix}{avg:,.0f}")
+                else:
+                    self.stats_labels[f"{key}_min"].config(text=f"Min: {prefix}{mn:.2f}")
+                    self.stats_labels[f"{key}_max"].config(text=f"Max: {prefix}{mx:.2f}")
+                    self.stats_labels[f"{key}_avg"].config(text=f"Ort: {prefix}{avg:.2f}")
+                
+                # Değişim %
+                first, last = first_last
+                if first and last:
+                    fi = {"gumus": 0, "altin": 1, "dolar": 2}[key]
+                    if first[fi] and first[fi] != 0:
+                        chg = ((last[fi] - first[fi]) / first[fi]) * 100
+                        sign = "+" if chg >= 0 else ""
+                        color = self.color_success if chg >= 0 else self.color_danger
+                        self.stats_labels[f"{key}_chg"].config(text=f"Δ: {sign}{chg:.1f}%", fg=color)
+                    else:
+                        self.stats_labels[f"{key}_chg"].config(text="Δ: --")
+        except Exception as e:
+            print(f"Stats error: {e}")
 
     def toggle_autostart(self):
         self.asm.set_autostart(self.var_autostart.get())
@@ -603,6 +926,7 @@ class PiyasaWidget:
                 "timestamp": time.strftime("%d.%m %H:%M")
             }
             self.save_last_data(market_data)
+            self.history_db.insert(ons_gumus, gram_gumus_tl, gram_altin_tl, dolar)
             
             # UI Güncelleme (Main Thread'e güvenli geçiş için)
             self.root.after(0, lambda: self.guncelle_arayuz(ons_gumus, gram_gumus_tl, gram_altin_tl))

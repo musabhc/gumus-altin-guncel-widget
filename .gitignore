@@ -1,3 +1,5 @@
 /transactions.json
 __pycache__/
 .pyc
+market_history.db
+/temp/
