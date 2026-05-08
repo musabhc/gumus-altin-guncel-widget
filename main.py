@@ -13,11 +13,6 @@ import requests
 import webbrowser
 import subprocess
 from datetime import datetime, timedelta
-import matplotlib
-matplotlib.use('Agg')
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import matplotlib.dates
 from tkinter import messagebox, filedialog
 
 # Configuration
@@ -657,16 +652,20 @@ class PiyasaWidget:
                                command=self._update_chart)
             rb.pack(side="right", padx=1)
         
-        # Matplotlib Figure
-        self.fig = Figure(figsize=(2.3, 1.7), dpi=100, facecolor=self.bg_color)
-        self.ax = self.fig.add_subplot(111)
-        self.fig.subplots_adjust(left=0.18, right=0.95, top=0.92, bottom=0.18)
-        
-        self.chart_canvas = FigureCanvasTkAgg(self.fig, master=self.page_chart)
-        self.chart_canvas.get_tk_widget().pack(fill="both", expand=True)
+        # tkinter Canvas grafik
+        self.chart_canvas = tk.Canvas(self.page_chart, bg=self.bg_color, highlightthickness=0)
+        self.chart_canvas.pack(fill="both", expand=True)
 
     def _update_chart(self):
         try:
+            self.chart_canvas.delete("all")
+            self.chart_canvas.update_idletasks()
+            
+            cw = self.chart_canvas.winfo_width()
+            ch = self.chart_canvas.winfo_height()
+            if cw < 10 or ch < 10:
+                cw, ch = 230, 170
+            
             days = self.chart_period.get()
             if days == 0:
                 data = self.history_db.get_all_history()
@@ -674,46 +673,85 @@ class PiyasaWidget:
                 data = self.history_db.get_history(days=days)
             
             if not data:
-                self.ax.clear()
-                self.ax.set_facecolor(self.bg_color)
-                self.ax.text(0.5, 0.5, "Veri yok", color="#666666", ha='center', va='center', transform=self.ax.transAxes, fontsize=10)
-                self.ax.tick_params(colors="#333333")
-                self.chart_canvas.draw()
+                self.chart_canvas.create_text(cw//2, ch//2, text="Veri yok", fill="#666666", font=("Segoe UI", 10))
                 return
             
             selected = self.chart_var.get()
-            col_map = {"gumus_tl": (2, "Gümüş TL/g", self.color_accent), 
-                       "altin_tl": (3, "Altın TL/g", self.color_gold), 
+            col_map = {"gumus_tl": (2, "Gümüş TL/g", self.color_accent),
+                       "altin_tl": (3, "Altın TL/g", self.color_gold),
                        "dolar": (4, "Dolar", self.color_success)}
             col_idx, title, color = col_map[selected]
             
-            timestamps = [datetime.fromisoformat(row[0]) for row in data]
             values = [row[col_idx] for row in data]
+            timestamps = [row[0] for row in data]
             
-            self.ax.clear()
-            self.ax.set_facecolor(self.bg_color)
-            self.ax.plot(timestamps, values, color=color, linewidth=1.2)
-            self.ax.fill_between(timestamps, values, alpha=0.1, color=color)
+            if not values or all(v is None for v in values):
+                self.chart_canvas.create_text(cw//2, ch//2, text="Veri yok", fill="#666666", font=("Segoe UI", 10))
+                return
             
-            self.ax.set_title(title, color="#888888", fontsize=8, pad=4)
-            self.ax.tick_params(colors="#444444", labelsize=6)
-            self.ax.spines['top'].set_visible(False)
-            self.ax.spines['right'].set_visible(False)
-            self.ax.spines['bottom'].set_color("#222222")
-            self.ax.spines['left'].set_color("#222222")
-            self.ax.yaxis.label.set_color("#666666")
+            # Grafik alanı (padding)
+            pad_l, pad_r, pad_t, pad_b = 45, 10, 22, 28
+            gw = cw - pad_l - pad_r
+            gh = ch - pad_t - pad_b
             
-            # X ekseni tarih formatı
-            if len(timestamps) > 1:
-                span = (timestamps[-1] - timestamps[0]).days
-                if span <= 2:
-                    self.ax.xaxis.set_major_formatter(matplotlib.dates.DateFormatter('%H:%M'))
-                else:
-                    self.ax.xaxis.set_major_formatter(matplotlib.dates.DateFormatter('%d/%m'))
-                self.fig.autofmt_xdate(rotation=30)
+            min_v = min(values)
+            max_v = max(values)
+            val_range = max_v - min_v if max_v != min_v else 1
             
-            self.ax.grid(True, alpha=0.1, color="#333333")
-            self.chart_canvas.draw()
+            # Başlık
+            self.chart_canvas.create_text(cw//2, 10, text=title, fill="#888888", font=("Segoe UI", 8))
+            
+            # Grid çizgileri
+            for i in range(5):
+                y = pad_t + int(gh * i / 4)
+                self.chart_canvas.create_line(pad_l, y, cw - pad_r, y, fill="#1a1a1a")
+                v = max_v - (val_range * i / 4)
+                fmt = f"{v:,.0f}" if v > 999 else f"{v:.2f}"
+                self.chart_canvas.create_text(pad_l - 4, y, text=fmt, fill="#444444", font=("Segoe UI", 6), anchor="e")
+            
+            # Veri noktalarını canvas koordinatlarına çevir
+            n = len(values)
+            points = []
+            for i, v in enumerate(values):
+                x = pad_l + int(gw * i / max(n - 1, 1))
+                y = pad_t + int(gh * (1 - (v - min_v) / val_range))
+                points.append((x, y))
+            
+            # Dolgu
+            if len(points) >= 2:
+                fill_points = list(points) + [(points[-1][0], pad_t + gh), (points[0][0], pad_t + gh)]
+                flat = [coord for p in fill_points for coord in p]
+                self.chart_canvas.create_polygon(flat, fill=color, stipple="gray12", outline="")
+            
+            # Çizgi
+            if len(points) >= 2:
+                flat_line = [coord for p in points for coord in p]
+                self.chart_canvas.create_line(flat_line, fill=color, width=1.5, smooth=True)
+            
+            # X ekseni etiketleri
+            label_count = min(4, n)
+            for i in range(label_count):
+                idx = int(i * (n - 1) / max(label_count - 1, 1))
+                x = points[idx][0]
+                ts = timestamps[idx]
+                try:
+                    dt = datetime.fromisoformat(ts)
+                    if n > 1:
+                        span = (datetime.fromisoformat(timestamps[-1]) - datetime.fromisoformat(timestamps[0])).days
+                        label = dt.strftime("%H:%M") if span <= 2 else dt.strftime("%d/%m")
+                    else:
+                        label = dt.strftime("%d/%m")
+                except:
+                    label = str(ts)[:5]
+                self.chart_canvas.create_text(x, ch - 10, text=label, fill="#444444", font=("Segoe UI", 6))
+            
+            # Son değer etiketi
+            last_x, last_y = points[-1]
+            last_v = values[-1]
+            fmt_v = f"{last_v:,.0f}" if last_v > 999 else f"{last_v:.2f}"
+            self.chart_canvas.create_oval(last_x-3, last_y-3, last_x+3, last_y+3, fill=color, outline="")
+            self.chart_canvas.create_text(last_x, last_y - 10, text=fmt_v, fill=color, font=("Segoe UI", 7, "bold"))
+            
         except Exception as e:
             print(f"Chart error: {e}")
 
