@@ -670,18 +670,18 @@ class PiyasaWidget:
         
         for text, val in [("Gümüş", "gumus_tl"), ("Altın", "altin_tl"), ("Dolar", "dolar")]:
             rb = tk.Radiobutton(selector_frame, text=text, variable=self.chart_var, value=val,
-                               bg=self.bg_color, fg="#888888", selectcolor="#1a1a1a",
+                               bg=self.bg_color, fg="#cccccc", selectcolor="#252525",
                                activebackground=self.bg_color, activeforeground="#ffffff",
-                               font=("Segoe UI", 7), indicatoron=0, padx=6, pady=1,
+                               font=("Segoe UI", 8), indicatoron=0, padx=6, pady=1,
                                command=self._update_chart)
             rb.pack(side="left", padx=1)
         
         # Periyot seçici
         for text, val in [("7G", 7), ("30G", 30), ("Tümü", 0)]:
             rb = tk.Radiobutton(selector_frame, text=text, variable=self.chart_period, value=val,
-                               bg=self.bg_color, fg="#555555", selectcolor="#1a1a1a",
+                               bg=self.bg_color, fg="#cccccc", selectcolor="#252525",
                                activebackground=self.bg_color, activeforeground="#ffffff",
-                               font=("Segoe UI", 7), indicatoron=0, padx=4, pady=1,
+                               font=("Segoe UI", 8), indicatoron=0, padx=4, pady=1,
                                command=self._update_chart)
             rb.pack(side="right", padx=1)
         
@@ -715,7 +715,7 @@ class PiyasaWidget:
                 data = self.history_db.get_history(days=days)
             
             if not data:
-                self.chart_canvas.create_text(cw//2, ch//2, text="Veri yok", fill="#666666", font=("Segoe UI", f_no_data))
+                self.chart_canvas.create_text(cw//2, ch//2, text="Veri yok", fill="#aaaaaa", font=("Segoe UI", f_no_data))
                 return
             
             selected = self.chart_var.get()
@@ -728,7 +728,7 @@ class PiyasaWidget:
             timestamps = [row[0] for row in data]
             
             if not values or all(v is None for v in values):
-                self.chart_canvas.create_text(cw//2, ch//2, text="Veri yok", fill="#666666", font=("Segoe UI", f_no_data))
+                self.chart_canvas.create_text(cw//2, ch//2, text="Veri yok", fill="#aaaaaa", font=("Segoe UI", f_no_data))
                 return
             
             # Grafik alanı (padding)
@@ -741,15 +741,15 @@ class PiyasaWidget:
             val_range = max_v - min_v if max_v != min_v else 1
             
             # Başlık
-            self.chart_canvas.create_text(cw//2, 10, text=title, fill="#888888", font=("Segoe UI", f_title))
+            self.chart_canvas.create_text(cw//2, 10, text=title, fill="#cccccc", font=("Segoe UI", f_title))
             
             # Grid çizgileri
             for i in range(5):
                 y = pad_t + int(gh * i / 4)
-                self.chart_canvas.create_line(pad_l, y, cw - pad_r, y, fill="#1a1a1a")
+                self.chart_canvas.create_line(pad_l, y, cw - pad_r, y, fill="#333333")
                 v = max_v - (val_range * i / 4)
                 fmt = f"{v:,.0f}" if v > 999 else f"{v:.2f}"
-                self.chart_canvas.create_text(pad_l - 4, y, text=fmt, fill="#444444", font=("Segoe UI", f_tick), anchor="e")
+                self.chart_canvas.create_text(pad_l - 4, y, text=fmt, fill="#aaaaaa", font=("Segoe UI", f_tick), anchor="e")
             
             # Veri noktalarını canvas koordinatlarına çevir
             n = len(values)
@@ -768,7 +768,7 @@ class PiyasaWidget:
             # Çizgi
             if len(points) >= 2:
                 flat_line = [coord for p in points for coord in p]
-                self.chart_canvas.create_line(flat_line, fill=color, width=1.5, smooth=True)
+                self.chart_canvas.create_line(flat_line, fill=color, width=1.5)
             
             # X ekseni etiketleri
             label_count = min(4, n)
@@ -785,7 +785,7 @@ class PiyasaWidget:
                         label = dt.strftime("%d/%m")
                 except:
                     label = str(ts)[:5]
-                self.chart_canvas.create_text(x, ch - 10, text=label, fill="#444444", font=("Segoe UI", f_tick))
+                self.chart_canvas.create_text(x, ch - 10, text=label, fill="#aaaaaa", font=("Segoe UI", f_tick))
             
             # Son değer etiketi
             last_x, last_y = points[-1]
@@ -807,9 +807,9 @@ class PiyasaWidget:
         
         for text, val in [("7 Gün", 7), ("30 Gün", 30), ("Tümü", 0)]:
             rb = tk.Radiobutton(period_frame, text=text, variable=self.stats_period, value=val,
-                               bg=self.bg_color, fg="#888888", selectcolor="#1a1a1a",
+                               bg=self.bg_color, fg="#cccccc", selectcolor="#252525",
                                activebackground=self.bg_color, activeforeground="#ffffff",
-                               font=("Segoe UI", 7), indicatoron=0, padx=6, pady=2,
+                               font=("Segoe UI", 8), indicatoron=0, padx=6, pady=2,
                                command=self._update_stats)
             rb.pack(side="left", padx=2)
         
@@ -829,19 +829,19 @@ class PiyasaWidget:
             row = tk.Frame(section, bg=self.bg_color)
             row.pack(fill="x")
             
-            self.stats_labels[f"{key}_min"] = tk.Label(row, text="Min: --", bg=self.bg_color, fg="#666666", font=("Segoe UI", 7))
+            self.stats_labels[f"{key}_min"] = tk.Label(row, text="Min: --", bg=self.bg_color, fg="#aaaaaa", font=("Segoe UI", 8))
             self.stats_labels[f"{key}_min"].pack(side="left", expand=True)
             
-            self.stats_labels[f"{key}_max"] = tk.Label(row, text="Max: --", bg=self.bg_color, fg="#666666", font=("Segoe UI", 7))
+            self.stats_labels[f"{key}_max"] = tk.Label(row, text="Max: --", bg=self.bg_color, fg="#aaaaaa", font=("Segoe UI", 8))
             self.stats_labels[f"{key}_max"].pack(side="left", expand=True)
             
             row2 = tk.Frame(section, bg=self.bg_color)
             row2.pack(fill="x")
             
-            self.stats_labels[f"{key}_avg"] = tk.Label(row2, text="Ort: --", bg=self.bg_color, fg="#666666", font=("Segoe UI", 7))
+            self.stats_labels[f"{key}_avg"] = tk.Label(row2, text="Ort: --", bg=self.bg_color, fg="#aaaaaa", font=("Segoe UI", 8))
             self.stats_labels[f"{key}_avg"].pack(side="left", expand=True)
             
-            self.stats_labels[f"{key}_chg"] = tk.Label(row2, text="Δ: --", bg=self.bg_color, fg="#666666", font=("Segoe UI", 7))
+            self.stats_labels[f"{key}_chg"] = tk.Label(row2, text="Δ: --", bg=self.bg_color, fg="#aaaaaa", font=("Segoe UI", 8))
             self.stats_labels[f"{key}_chg"].pack(side="left", expand=True)
 
     def _update_stats(self):
