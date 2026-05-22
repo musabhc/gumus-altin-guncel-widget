@@ -59,6 +59,7 @@ class MarketHistoryDB:
         self.db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), db_name)
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._create_table()
+        self.cleanup_bad_records()
 
     def _create_table(self):
         self.conn.execute("""
@@ -73,7 +74,26 @@ class MarketHistoryDB:
         """)
         self.conn.commit()
 
+    def cleanup_bad_records(self):
+        """Veritabanındaki sıfır veya None değerli bozuk kayıtları temizle."""
+        try:
+            deleted = self.conn.execute(
+                "DELETE FROM market_history WHERE ons_gumus IS NULL OR ons_gumus <= 0 "
+                "OR gram_gumus_tl IS NULL OR gram_gumus_tl <= 0 "
+                "OR gram_altin_tl IS NULL OR gram_altin_tl <= 0 "
+                "OR dolar IS NULL OR dolar <= 0"
+            ).rowcount
+            if deleted > 0:
+                self.conn.commit()
+                print(f"Veritabanından {deleted} bozuk kayıt temizlendi.")
+        except Exception as e:
+            print(f"Temizlik hatası: {e}")
+
     def insert(self, ons_gumus, gram_gumus_tl, gram_altin_tl, dolar):
+        # Sıfır veya None değerleri kaydetme
+        if not all(v and v > 0 for v in [ons_gumus, gram_gumus_tl, gram_altin_tl, dolar]):
+            print(f"Geçersiz veri atlandı: ons={ons_gumus}, gumus_tl={gram_gumus_tl}, altin_tl={gram_altin_tl}, dolar={dolar}")
+            return
         self.conn.execute(
             "INSERT INTO market_history (timestamp, ons_gumus, gram_gumus_tl, gram_altin_tl, dolar) VALUES (?, ?, ?, ?, ?)",
             (datetime.now().isoformat(), ons_gumus, gram_gumus_tl, gram_altin_tl, dolar)
@@ -83,50 +103,56 @@ class MarketHistoryDB:
     def get_history(self, days=7):
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         cursor = self.conn.execute(
-            "SELECT timestamp, ons_gumus, gram_gumus_tl, gram_altin_tl, dolar FROM market_history WHERE timestamp >= ? ORDER BY timestamp",
+            "SELECT timestamp, ons_gumus, gram_gumus_tl, gram_altin_tl, dolar FROM market_history "
+            "WHERE timestamp >= ? AND gram_gumus_tl > 0 AND gram_altin_tl > 0 AND dolar > 0 "
+            "ORDER BY timestamp",
             (cutoff,)
         )
         return cursor.fetchall()
 
     def get_all_history(self):
         cursor = self.conn.execute(
-            "SELECT timestamp, ons_gumus, gram_gumus_tl, gram_altin_tl, dolar FROM market_history ORDER BY timestamp"
+            "SELECT timestamp, ons_gumus, gram_gumus_tl, gram_altin_tl, dolar FROM market_history "
+            "WHERE gram_gumus_tl > 0 AND gram_altin_tl > 0 AND dolar > 0 "
+            "ORDER BY timestamp"
         )
         return cursor.fetchall()
 
     def get_stats(self, days=None):
+        valid_filter = "AND gram_gumus_tl > 0 AND gram_altin_tl > 0 AND dolar > 0"
         if days:
             cutoff = (datetime.now() - timedelta(days=days)).isoformat()
-            cursor = self.conn.execute("""
+            cursor = self.conn.execute(f"""
                 SELECT MIN(gram_gumus_tl), MAX(gram_gumus_tl), AVG(gram_gumus_tl),
                        MIN(gram_altin_tl), MAX(gram_altin_tl), AVG(gram_altin_tl),
                        MIN(dolar), MAX(dolar), AVG(dolar), COUNT(*)
-                FROM market_history WHERE timestamp >= ?
+                FROM market_history WHERE timestamp >= ? {valid_filter}
             """, (cutoff,))
         else:
-            cursor = self.conn.execute("""
+            cursor = self.conn.execute(f"""
                 SELECT MIN(gram_gumus_tl), MAX(gram_gumus_tl), AVG(gram_gumus_tl),
                        MIN(gram_altin_tl), MAX(gram_altin_tl), AVG(gram_altin_tl),
                        MIN(dolar), MAX(dolar), AVG(dolar), COUNT(*)
-                FROM market_history
+                FROM market_history WHERE 1=1 {valid_filter}
             """)
         return cursor.fetchone()
 
     def get_first_last(self, days=None):
+        valid_filter = "AND gram_gumus_tl > 0 AND gram_altin_tl > 0 AND dolar > 0"
         if days:
             cutoff = (datetime.now() - timedelta(days=days)).isoformat()
             first = self.conn.execute(
-                "SELECT gram_gumus_tl, gram_altin_tl, dolar FROM market_history WHERE timestamp >= ? ORDER BY timestamp ASC LIMIT 1", (cutoff,)
+                f"SELECT gram_gumus_tl, gram_altin_tl, dolar FROM market_history WHERE timestamp >= ? {valid_filter} ORDER BY timestamp ASC LIMIT 1", (cutoff,)
             ).fetchone()
             last = self.conn.execute(
-                "SELECT gram_gumus_tl, gram_altin_tl, dolar FROM market_history WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT 1", (cutoff,)
+                f"SELECT gram_gumus_tl, gram_altin_tl, dolar FROM market_history WHERE timestamp >= ? {valid_filter} ORDER BY timestamp DESC LIMIT 1", (cutoff,)
             ).fetchone()
         else:
             first = self.conn.execute(
-                "SELECT gram_gumus_tl, gram_altin_tl, dolar FROM market_history ORDER BY timestamp ASC LIMIT 1"
+                f"SELECT gram_gumus_tl, gram_altin_tl, dolar FROM market_history WHERE 1=1 {valid_filter} ORDER BY timestamp ASC LIMIT 1"
             ).fetchone()
             last = self.conn.execute(
-                "SELECT gram_gumus_tl, gram_altin_tl, dolar FROM market_history ORDER BY timestamp DESC LIMIT 1"
+                f"SELECT gram_gumus_tl, gram_altin_tl, dolar FROM market_history WHERE 1=1 {valid_filter} ORDER BY timestamp DESC LIMIT 1"
             ).fetchone()
         return first, last
 
@@ -416,7 +442,7 @@ class PiyasaWidget:
         # --- AYARLAR ---
         self.bg_color = "#1e1e1e"  # Koyu Gri Arka Plan
         self.text_color = "#00ff41" # Matrix Yeşili
-        self.alpha = 0.85          # Saydamlık (0.1 - 1.0)
+        self.alpha = 1.0           # Saydamlık kapalı (tam opak)
         self.refresh_rate = 60     # Saniye cinsinden yenileme
         
         # Pencere Ayarları
@@ -453,8 +479,10 @@ class PiyasaWidget:
         self.setup_ui()
         
         # Sürükleme Özelliği
+        self._is_resizing = False
         self.root.bind("<Button-1>", self.start_move)
         self.root.bind("<B1-Motion>", self.do_move)
+        self.root.bind("<ButtonRelease-1>", self._on_button_release)
         
         # Sağ Tık Menüsü
         self.menu = tk.Menu(self.root, tearoff=0)
@@ -513,6 +541,7 @@ class PiyasaWidget:
         
         # Responsive tasarım için takip
         self.last_width = 260
+        self._resize_after_id = None  # Debounce timer
         self.root.bind("<Configure>", self.on_resize)
         
         # Renk Paleti (Ultra Dark)
@@ -615,6 +644,7 @@ class PiyasaWidget:
         self.grip.place(relx=1.0, rely=1.0, anchor="se")
         self.grip.bind("<ButtonPress-1>", self.start_resize)
         self.grip.bind("<B1-Motion>", self.do_resize)
+        self.grip.bind("<ButtonRelease-1>", self._on_resize_end)
         self.grip.bind("<Enter>", lambda e: self.grip.config(fg="#666666"))
         self.grip.bind("<Leave>", lambda e: self.grip.config(fg="#333333"))
 
@@ -689,13 +719,57 @@ class PiyasaWidget:
         self.chart_canvas = tk.Canvas(self.page_chart, bg=self.bg_color, highlightthickness=0)
         self.chart_canvas.pack(fill="both", expand=True)
 
+    @staticmethod
+    def _filter_outliers(values, timestamps):
+        """IQR tabanlı outlier filtreleme. Bozuk veri noktalarını temizler."""
+        if len(values) < 4:
+            return values, timestamps
+        
+        # None ve sıfır değerleri filtrele
+        clean_vals = []
+        clean_ts = []
+        for v, t in zip(values, timestamps):
+            if v is not None and v > 0:
+                clean_vals.append(v)
+                clean_ts.append(t)
+        
+        if len(clean_vals) < 4:
+            return clean_vals, clean_ts
+        
+        # IQR hesapla
+        sorted_v = sorted(clean_vals)
+        n = len(sorted_v)
+        q1 = sorted_v[n // 4]
+        q3 = sorted_v[(3 * n) // 4]
+        iqr = q3 - q1
+        
+        # IQR 0 ise medyan etrafında %20 tolerans kullan
+        if iqr == 0:
+            median = sorted_v[n // 2]
+            lower = median * 0.8
+            upper = median * 1.2
+        else:
+            lower = q1 - 2.0 * iqr
+            upper = q3 + 2.0 * iqr
+        
+        filtered_vals = []
+        filtered_ts = []
+        for v, t in zip(clean_vals, clean_ts):
+            if lower <= v <= upper:
+                filtered_vals.append(v)
+                filtered_ts.append(t)
+        
+        # Filtreleme sonrası veri kalmadıysa orijinali döndür
+        if not filtered_vals:
+            return clean_vals, clean_ts
+        
+        return filtered_vals, filtered_ts
+
     def _update_chart(self):
         try:
             self.chart_canvas.delete("all")
             self.chart_canvas.update_idletasks()
             
-            cw = self.chart_canvas.winfo_width()
-            ch = self.chart_canvas.winfo_height()
             cw = self.chart_canvas.winfo_width()
             ch = self.chart_canvas.winfo_height()
             if cw < 10 or ch < 10:
@@ -724,42 +798,55 @@ class PiyasaWidget:
                        "dolar": (4, "Dolar", self.color_success)}
             col_idx, title, color = col_map[selected]
             
-            values = [row[col_idx] for row in data]
-            timestamps = [row[0] for row in data]
+            raw_values = [row[col_idx] for row in data]
+            raw_timestamps = [row[0] for row in data]
             
-            if not values or all(v is None for v in values):
+            # Outlier filtreleme (bozuk/saçma verileri temizle)
+            values, timestamps = self._filter_outliers(raw_values, raw_timestamps)
+            
+            if not values:
                 self.chart_canvas.create_text(cw//2, ch//2, text="Veri yok", fill="#aaaaaa", font=("Segoe UI", f_no_data))
                 return
             
-            # Grafik alanı (padding)
-            pad_l, pad_r, pad_t, pad_b = 45, 10, 22, 28
+            # Grafik alanı (padding) — sol taraf daha geniş, okunabilirlik için
+            pad_l, pad_r, pad_t, pad_b = 50, 15, 25, 30
             gw = cw - pad_l - pad_r
             gh = ch - pad_t - pad_b
             
             min_v = min(values)
             max_v = max(values)
-            val_range = max_v - min_v if max_v != min_v else 1
+            
+            # Y ekseninde %5 marj bırak (grafik taşmasın)
+            margin = (max_v - min_v) * 0.05 if max_v != min_v else max_v * 0.02
+            chart_min = min_v - margin
+            chart_max = max_v + margin
+            val_range = chart_max - chart_min if chart_max != chart_min else 1
             
             # Başlık
             self.chart_canvas.create_text(cw//2, 10, text=title, fill="#cccccc", font=("Segoe UI", f_title))
             
-            # Grid çizgileri
+            # Grid çizgileri ve Y ekseni etiketleri
             for i in range(5):
                 y = pad_t + int(gh * i / 4)
-                self.chart_canvas.create_line(pad_l, y, cw - pad_r, y, fill="#333333")
-                v = max_v - (val_range * i / 4)
-                fmt = f"{v:,.0f}" if v > 999 else f"{v:.2f}"
-                self.chart_canvas.create_text(pad_l - 4, y, text=fmt, fill="#aaaaaa", font=("Segoe UI", f_tick), anchor="e")
+                self.chart_canvas.create_line(pad_l, y, cw - pad_r, y, fill="#222222", dash=(2, 4))
+                v = chart_max - (val_range * i / 4)
+                if v >= 10000:
+                    fmt = f"{v:,.0f}"
+                elif v >= 100:
+                    fmt = f"{v:.1f}"
+                else:
+                    fmt = f"{v:.2f}"
+                self.chart_canvas.create_text(pad_l - 5, y, text=fmt, fill="#888888", font=("Segoe UI", f_tick), anchor="e")
             
             # Veri noktalarını canvas koordinatlarına çevir
             n = len(values)
             points = []
             for i, v in enumerate(values):
                 x = pad_l + int(gw * i / max(n - 1, 1))
-                y = pad_t + int(gh * (1 - (v - min_v) / val_range))
+                y = pad_t + int(gh * (1 - (v - chart_min) / val_range))
                 points.append((x, y))
             
-            # Dolgu
+            # Dolgu (gradient efekti)
             if len(points) >= 2:
                 fill_points = list(points) + [(points[-1][0], pad_t + gh), (points[0][0], pad_t + gh)]
                 flat = [coord for p in fill_points for coord in p]
@@ -768,7 +855,7 @@ class PiyasaWidget:
             # Çizgi
             if len(points) >= 2:
                 flat_line = [coord for p in points for coord in p]
-                self.chart_canvas.create_line(flat_line, fill=color, width=1.5)
+                self.chart_canvas.create_line(flat_line, fill=color, width=1.5, smooth=True)
             
             # X ekseni etiketleri
             label_count = min(4, n)
@@ -785,14 +872,21 @@ class PiyasaWidget:
                         label = dt.strftime("%d/%m")
                 except:
                     label = str(ts)[:5]
-                self.chart_canvas.create_text(x, ch - 10, text=label, fill="#aaaaaa", font=("Segoe UI", f_tick))
+                self.chart_canvas.create_text(x, ch - 10, text=label, fill="#888888", font=("Segoe UI", f_tick))
             
             # Son değer etiketi
             last_x, last_y = points[-1]
             last_v = values[-1]
-            fmt_v = f"{last_v:,.0f}" if last_v > 999 else f"{last_v:.2f}"
+            if last_v >= 10000:
+                fmt_v = f"{last_v:,.0f}"
+            elif last_v >= 100:
+                fmt_v = f"{last_v:.1f}"
+            else:
+                fmt_v = f"{last_v:.2f}"
             self.chart_canvas.create_oval(last_x-3, last_y-3, last_x+3, last_y+3, fill=color, outline="")
-            self.chart_canvas.create_text(last_x, last_y - 10, text=fmt_v, fill=color, font=("Segoe UI", f_val, "bold"))
+            # Etiketi grafik sınırları içinde tut
+            label_y = max(last_y - 12, pad_t + 5)
+            self.chart_canvas.create_text(last_x, label_y, text=fmt_v, fill=color, font=("Segoe UI", f_val, "bold"))
             
         except Exception as e:
             print(f"Chart error: {e}")
@@ -997,19 +1091,31 @@ class PiyasaWidget:
             gram_gumus_tl = (ons_gumus * dolar) / 31.1035
             gram_altin_tl = (ons_altin * dolar) / 31.1035
             
-            # Verileri kaydet
-            market_data = {
-                "ons_gumus": ons_gumus,
-                "gram_gumus_tl": gram_gumus_tl,
-                "gram_altin_tl": gram_altin_tl,
-                "dolar": dolar,
-                "timestamp": time.strftime("%d.%m %H:%M")
-            }
-            self.save_last_data(market_data)
-            self.history_db.insert(ons_gumus, gram_gumus_tl, gram_altin_tl, dolar)
-            
-            # UI Güncelleme (Main Thread'e güvenli geçiş için)
-            self.root.after(0, lambda: self.guncelle_arayuz(ons_gumus, gram_gumus_tl, gram_altin_tl))
+            # Geçerlilik kontrolü: tüm değerler pozitif olmalı
+            if all(v and v > 0 for v in [ons_gumus, gram_gumus_tl, gram_altin_tl, dolar]):
+                # Verileri kaydet
+                market_data = {
+                    "ons_gumus": ons_gumus,
+                    "gram_gumus_tl": gram_gumus_tl,
+                    "gram_altin_tl": gram_altin_tl,
+                    "dolar": dolar,
+                    "timestamp": time.strftime("%d.%m %H:%M")
+                }
+                self.save_last_data(market_data)
+                self.history_db.insert(ons_gumus, gram_gumus_tl, gram_altin_tl, dolar)
+                
+                # UI Güncelleme (Main Thread'e güvenli geçiş için)
+                self.root.after(0, lambda: self.guncelle_arayuz(ons_gumus, gram_gumus_tl, gram_altin_tl))
+            else:
+                # Geçersiz veri — son bilinen veriyi göster, kaydetme
+                print(f"Geçersiz veri atlandı: ons={ons_gumus}, dolar={dolar}")
+                last_data = self.load_last_data()
+                if last_data:
+                    self.root.after(0, lambda: self.guncelle_arayuz(
+                        last_data.get("ons_gumus", 0),
+                        last_data.get("gram_gumus_tl", 0),
+                        last_data.get("gram_altin_tl", 0)
+                    ))
             
         except Exception as e:
             self.root.after(0, lambda: self.var_time.set("Bağlantı Hatası"))
@@ -1114,6 +1220,7 @@ class PiyasaWidget:
 
     # --- Yeniden Boyutlandırma Mantığı ---
     def start_resize(self, event):
+        self._is_resizing = True
         self.resize_start_x = event.x_root
         self.resize_start_y = event.y_root
         self.start_width = self.root.winfo_width()
@@ -1127,37 +1234,62 @@ class PiyasaWidget:
         new_height = max(300, self.start_height + deltay)
         
         self.root.geometry(f"{new_width}x{new_height}")
+    
+    def _on_resize_end(self, event):
+        """Resize grip bırakıldığında çağrılır."""
+        self._is_resizing = False
+        # Son boyutlara göre fontları ve grafiği güncelle
+        self._apply_font_scale()
+        if hasattr(self, 'current_page') and self.current_page == 1:
+            self.root.after(50, self._update_chart)
+    
+    def _on_button_release(self, event):
+        """Genel buton bırakma - resize flag'ini temizle."""
+        self._is_resizing = False
 
     def on_resize(self, event):
         if event.widget == self.root:
             w = event.width
-            if abs(w - self.last_width) > 20: # Sadece belirgin boyut değişimlerinde ölçekle
+            if abs(w - self.last_width) > 20:
                 self.last_width = w
-                scale = max(1.0, w / 260.0)
-                
-                # Sınırlı ölçekleme (çok büyümesin diye scale factor max 1.5)
-                scale = min(1.5, scale)
-                
-                # Fontları güncelle
-                self.font_header.config(size=int(self.base_fonts["header"] * scale))
-                self.font_label.config(size=int(self.base_fonts["label"] * scale))
-                self.font_value.config(size=int(self.base_fonts["value"] * scale))
-                self.font_portfolio.config(size=int(self.base_fonts["portfolio"] * scale))
-                self.font_profit.config(size=int(self.base_fonts["profit"] * scale))
-                self.font_market_status.config(size=int(self.base_fonts["market_status"] * scale))
-                self.font_nav_arrow.config(size=int(9 * scale))
-                self.font_icon.config(size=int(10 * scale))
-                
-                # Grafik sayfasındaysa güncel boyutlara göre yeniden çiz
-                if hasattr(self, 'current_page') and self.current_page == 1:
-                    self.root.after(100, self._update_chart)
+                # Debounce: Sürekli sürükleme sırasında font güncelleme yapma,
+                # sadece kullanıcı durunca (150ms sonra) güncelle
+                if self._resize_after_id is not None:
+                    self.root.after_cancel(self._resize_after_id)
+                self._resize_after_id = self.root.after(150, self._apply_font_scale)
+    
+    def _apply_font_scale(self):
+        """Fontları mevcut pencere genişliğine göre ölçekle (debounced)."""
+        self._resize_after_id = None
+        w = self.root.winfo_width()
+        scale = max(1.0, w / 260.0)
+        scale = min(1.5, scale)  # Çok büyümesin
+        
+        self.font_header.config(size=int(self.base_fonts["header"] * scale))
+        self.font_label.config(size=int(self.base_fonts["label"] * scale))
+        self.font_value.config(size=int(self.base_fonts["value"] * scale))
+        self.font_portfolio.config(size=int(self.base_fonts["portfolio"] * scale))
+        self.font_profit.config(size=int(self.base_fonts["profit"] * scale))
+        self.font_market_status.config(size=int(self.base_fonts["market_status"] * scale))
+        self.font_nav_arrow.config(size=int(9 * scale))
+        self.font_icon.config(size=int(10 * scale))
+        
+        # Grafik sayfasındaysa güncel boyutlara göre yeniden çiz
+        if hasattr(self, 'current_page') and self.current_page == 1:
+            self.root.after(50, self._update_chart)
 
     # --- Sürükleme Mantığı ---
     def start_move(self, event):
+        # Resize grip üzerindeyse sürüklemeyi başlatma
+        if event.widget == self.grip:
+            return
         self.x = event.x
         self.y = event.y
 
     def do_move(self, event):
+        # Resize sırasında pencereyi sürükleme
+        if self._is_resizing:
+            return
         deltax = event.x - self.x
         deltay = event.y - self.y
         x = self.root.winfo_x() + deltax
