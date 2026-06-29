@@ -444,16 +444,19 @@ class PiyasaWidget:
         self.text_color = "#00ff41" # Matrix Yeşili
         self.alpha = 1.0           # Saydamlık kapalı (tam opak)
         self.refresh_rate = 60     # Saniye cinsinden yenileme
+        self.default_topmost = False
         
         # Pencere Ayarları
         self.root.overrideredirect(True) # Çerçevesiz
-        self.root.attributes("-alpha", self.alpha)
+        if self.alpha < 1.0:
+            self.root.attributes("-alpha", self.alpha)
         # self.root.attributes("-topmost", True) # Her zaman üstte - Widget modunda her zaman üstte olması istenmeyebilir, ama widget mantığı genelde masaüstünde durur. Kullanıcı "arkaplanda" dedi.
         # Kullanıcı "üstte" demedi, "arkaplanda" dedi. Genellikle widgetlar masaüstünde durur (altta).
         # Ancak "Topmost" açık olursa diğer pencerelerin üstünde durur. Kullanıcı bunu istemiyor olabilir.
         # "Programın altta uygulama olarak gözükerek değil" -> Taskbar'da görünmesin.
         
-        self.root.attributes("-topmost", True) # Widget olduğu için görünür olmalı, genelde üstte tutulur ama opsiyonel. Varsayılan üstte kalsın.
+        if self.default_topmost:
+            self.root.attributes("-topmost", True)
         
         self.root.configure(bg=self.bg_color)
         try:
@@ -474,6 +477,8 @@ class PiyasaWidget:
         self.um = UpdateManager(VERSION, GITHUB_REPO)
         self.history_db = MarketHistoryDB()
         self.current_page = 0
+        self._fetch_lock = threading.Lock()
+        self._stop_event = threading.Event()
         
         # UI Elemanları
         self.setup_ui()
@@ -491,7 +496,7 @@ class PiyasaWidget:
 
         # Ayarlar Menüsü (çark simgesi)
         self.var_autostart = tk.BooleanVar(value=self.asm.is_enabled())
-        self.var_topmost = tk.BooleanVar(value=True)
+        self.var_topmost = tk.BooleanVar(value=self.default_topmost)
         self.settings_menu = tk.Menu(self.root, tearoff=0)
         self.settings_menu.add_checkbutton(
             label="Windows ile başlat",
@@ -602,7 +607,7 @@ class PiyasaWidget:
         create_icon_btn(footer_frame, "⚙️", self.open_settings)
         create_icon_btn(footer_frame, "📥", self.import_transactions)
         create_icon_btn(footer_frame, "➕", self.open_add_transaction)
-        create_icon_btn(footer_frame, "🔄", self.veri_getir)
+        create_icon_btn(footer_frame, "🔄", self.request_data_refresh)
 
         # 2. İÇERİK KONTEYNERİ (Sayfa bazlı geçiş)
         self.content_container = tk.Frame(self.frame, bg=self.bg_color)
@@ -768,7 +773,6 @@ class PiyasaWidget:
     def _update_chart(self):
         try:
             self.chart_canvas.delete("all")
-            self.chart_canvas.update_idletasks()
             
             cw = self.chart_canvas.winfo_width()
             ch = self.chart_canvas.winfo_height()
@@ -1037,7 +1041,12 @@ class PiyasaWidget:
             print(f"Veri okuma hatası: {e}")
         return None
 
+    def request_data_refresh(self):
+        threading.Thread(target=self.veri_getir, daemon=True).start()
+
     def veri_getir(self):
+        if not self._fetch_lock.acquire(blocking=False):
+            return
         try:
             # Piyasa kontrolü
             if self.is_market_closed():
@@ -1075,8 +1084,28 @@ class PiyasaWidget:
             
             # Veri çekme
             def get_price(symbol):
+                ticker = tickers.tickers[symbol]
                 try:
-                    info = tickers.tickers[symbol].info
+                    fast_info = getattr(ticker, "fast_info", None)
+                    if fast_info:
+                        for key in (
+                            "last_price", "lastPrice",
+                            "regular_market_price", "regularMarketPrice",
+                            "previous_close", "previousClose",
+                            "regular_market_previous_close", "regularMarketPreviousClose",
+                            "bid",
+                        ):
+                            try:
+                                val = fast_info.get(key) if hasattr(fast_info, "get") else getattr(fast_info, key, None)
+                                if val and val > 0:
+                                    return float(val)
+                            except:
+                                pass
+                except:
+                    pass
+
+                try:
+                    info = ticker.info
                     val = info.get("regularMarketPrice") or info.get("previousClose") or info.get("bid") or 0
                     return val
                 except:
@@ -1119,6 +1148,8 @@ class PiyasaWidget:
             
         except Exception as e:
             self.root.after(0, lambda: self.var_time.set("Bağlantı Hatası"))
+        finally:
+            self._fetch_lock.release()
 
     def guncelle_arayuz(self, ons_g, gram_g, gram_a):
         self.var_gumus_ons.set(f"${ons_g:.2f}")
@@ -1157,7 +1188,7 @@ class PiyasaWidget:
         except:
              pass
              
-        PortfolioManagerDialog(self.root, self.tm, self.veri_getir, getattr(self, 'last_dolar_rate', 36.0))
+        PortfolioManagerDialog(self.root, self.tm, self.request_data_refresh, getattr(self, 'last_dolar_rate', 36.0))
 
     def import_transactions(self):
         filename = filedialog.askopenfilename(title="İçe Aktarılacak Dosyayı Seç", filetypes=[("JSON Files", "*.json")])
@@ -1187,7 +1218,7 @@ class PiyasaWidget:
                 messagebox.showerror("Hata", f"İçe aktarma hatası: {e}")
             finally:
                 # Arayüzü güncelle
-                self.veri_getir()
+                self.request_data_refresh()
 
     def open_settings(self, event=None):
         # Menüyü fare konumunda aç
@@ -1213,9 +1244,9 @@ class PiyasaWidget:
         self.root.after(10, self.root.deiconify)
 
     def veri_dongusu(self):
-        while True:
+        while not self._stop_event.is_set():
             self.veri_getir()
-            time.sleep(self.refresh_rate)
+            self._stop_event.wait(self.refresh_rate)
 
 
     # --- Yeniden Boyutlandırma Mantığı ---
@@ -1300,6 +1331,7 @@ class PiyasaWidget:
         self.menu.post(event.x_root, event.y_root)
 
     def kapat(self):
+        self._stop_event.set()
         self.root.destroy()
         sys.exit()
 
