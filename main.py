@@ -328,13 +328,27 @@ class TransactionManager:
             return []
 
     def save(self, transaction):
-        normalized = self.normalize_transaction(transaction)
-        if normalized["action"] == "sell":
-            current_qty = self.get_position_quantity(normalized["instrument_key"])
-            if normalized["quantity"] > current_qty + 1e-9:
-                raise ValueError("Satış miktarı mevcut miktardan büyük olamaz.")
+        self.validate_transaction(transaction)
         self.transactions.append(transaction)
         self.save_all()
+
+    def replace(self, index, transaction):
+        if index < 0 or index >= len(self.transactions):
+            raise ValueError("Düzenlenecek işlem bulunamadı.")
+        self.validate_transaction(transaction, exclude_index=index)
+        self.transactions[index] = transaction
+        self.save_all()
+
+    def validate_transaction(self, transaction, exclude_index=None):
+        normalized = self.normalize_transaction(transaction)
+        if normalized["quantity"] <= 0:
+            raise ValueError("Miktar pozitif olmalı.")
+        if normalized["total_tl"] < 0:
+            raise ValueError("Toplam tutar sıfır veya pozitif olmalı.")
+        if normalized["action"] == "sell":
+            current_qty = self.get_position_quantity(normalized["instrument_key"], exclude_index=exclude_index)
+            if normalized["quantity"] > current_qty + 1e-9:
+                raise ValueError("Satış miktarı mevcut miktardan büyük olamaz.")
         
     def save_all(self):
         with open(self.filename, 'w', encoding='utf-8') as f:
@@ -367,13 +381,15 @@ class TransactionManager:
             "fx_rate": fx_rate,
         }
 
-    def get_position_quantity(self, instrument_key):
-        positions = self.get_positions()
+    def get_position_quantity(self, instrument_key, exclude_index=None):
+        positions = self.get_positions(exclude_index=exclude_index)
         return positions.get(instrument_key, {}).get("quantity", 0.0)
 
-    def get_positions(self):
+    def get_positions(self, exclude_index=None):
         positions = {}
-        for transaction in self.transactions:
+        for idx, transaction in enumerate(self.transactions):
+            if exclude_index is not None and idx == exclude_index:
+                continue
             t = self.normalize_transaction(transaction)
             key = t["instrument_key"]
             qty = t["quantity"]
@@ -749,44 +765,55 @@ class PortfolioManagerDialog(tk.Toplevel):
         self.instruments = portfolio_instruments(instruments)
         self.instrument_by_key = {item["key"]: item for item in self.instruments}
         self.instrument_label_to_key = {item["label"]: item["key"] for item in self.instruments}
+        self.edit_index = None
+        self.bg_color = "#0b0f14"
+        self.color_card = "#141a21"
+        self.color_card_alt = "#10161d"
+        self.color_border = "#202936"
+        self.color_text_main = "#f8fafc"
+        self.color_text_dim = "#8a94a3"
+        self.color_text_muted = "#5d6675"
+        self.color_accent = "#3b82f6"
+        self.color_danger = "#ef4444"
         self.title("Portföy Yönetimi")
         self.geometry("860x520")
-        self.configure(bg="#2d2d2d")
+        self.configure(bg=self.bg_color)
         
         # --- Sol Panel: Liste ---
-        left_frame = tk.Frame(self, bg="#2d2d2d", padx=10, pady=10)
+        left_frame = tk.Frame(self, bg=self.bg_color, padx=12, pady=12)
         left_frame.pack(side="left", fill="both", expand=True)
         
-        tk.Label(left_frame, text="İşlem Geçmişi", bg="#2d2d2d", fg="#cccccc", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 10))
+        tk.Label(left_frame, text="İşlem Geçmişi", bg=self.bg_color, fg=self.color_text_main, font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 10))
         
         # Treeview Stil
         style = ttk.Style()
         style.theme_use("clam")
-        style.configure("Treeview", 
-                        background="#3d3d3d", 
-                        foreground="white", 
-                        fieldbackground="#3d3d3d", 
+        style.configure("Portfolio.Treeview",
+                        background=self.color_card,
+                        foreground=self.color_text_main,
+                        fieldbackground=self.color_card,
                         borderwidth=0,
                         rowheight=25,
                         font=("Segoe UI", 9))
         
-        style.configure("Treeview.Heading", 
-                        background="#252526", 
-                        foreground="white", 
+        style.configure("Portfolio.Treeview.Heading",
+                        background=self.color_card_alt,
+                        foreground=self.color_text_main,
                         relief="flat",
                         font=("Segoe UI", 9, "bold"))
                         
-        style.map("Treeview", background=[('selected', '#007acc')])
+        style.map("Portfolio.Treeview", background=[('selected', self.color_accent)])
         
         # Treeview
-        columns = ("date", "action", "asset", "amount", "total", "delete")
-        self.tree = ttk.Treeview(left_frame, columns=columns, show="headings", height=15)
+        columns = ("date", "action", "asset", "amount", "total", "edit", "delete")
+        self.tree = ttk.Treeview(left_frame, columns=columns, show="headings", height=15, style="Portfolio.Treeview")
         
         self.tree.heading("date", text="Tarih")
         self.tree.heading("action", text="İşlem")
         self.tree.heading("asset", text="Varlık")
         self.tree.heading("amount", text="Miktar")
         self.tree.heading("total", text="Toplam")
+        self.tree.heading("edit", text="")
         self.tree.heading("delete", text="")
         
         self.tree.column("date", width=90, anchor="center")
@@ -794,6 +821,7 @@ class PortfolioManagerDialog(tk.Toplevel):
         self.tree.column("asset", width=110, anchor="w")
         self.tree.column("amount", width=90, anchor="center")
         self.tree.column("total", width=110, anchor="center")
+        self.tree.column("edit", width=36, anchor="center")
         self.tree.column("delete", width=40, anchor="center")
         
         self.tree.pack(side="left", fill="both", expand=True)
@@ -805,13 +833,16 @@ class PortfolioManagerDialog(tk.Toplevel):
         self.tree.configure(yscrollcommand=scrollbar.set)
         
         # --- Sağ Panel: Ekleme ---
-        right_frame = tk.Frame(self, bg="#333333", padx=20, pady=20) # Biraz daha açık arka plan
+        right_frame = tk.Frame(self, bg=self.color_card, padx=20, pady=20, highlightthickness=1, highlightbackground=self.color_border)
         right_frame.pack(side="right", fill="y")
         
-        tk.Label(right_frame, text="Yeni İşlem", bg="#333333", fg="white", font=("Segoe UI", 14, "bold")).pack(anchor="w", pady=(0, 20))
+        self.var_form_title = tk.StringVar(value="Yeni İşlem")
+        tk.Label(right_frame, textvariable=self.var_form_title, bg=self.color_card, fg=self.color_text_main, font=("Segoe UI", 14, "bold")).pack(anchor="w", pady=(0, 20))
         
-        style_entry = {"bg": "#454545", "fg": "white", "insertbackground": "white", "relief": "flat", "font": ("Segoe UI", 10)}
-        style_label = {"bg": "#333333", "fg": "#cccccc", "font": ("Segoe UI", 9)}
+        self.style_entry = {"bg": "#1b2430", "fg": self.color_text_main, "insertbackground": self.color_text_main, "relief": "flat", "font": ("Segoe UI", 10)}
+        self.style_label = {"bg": self.color_card, "fg": self.color_text_dim, "font": ("Segoe UI", 9)}
+        style_entry = self.style_entry
+        style_label = self.style_label
         
         # 1. Tarih
         tk.Label(right_frame, text="Tarih", **style_label).pack(anchor="w")
@@ -830,11 +861,11 @@ class PortfolioManagerDialog(tk.Toplevel):
         # 3. İşlem türü
         tk.Label(right_frame, text="İşlem", **style_label).pack(anchor="w")
         self.var_action = tk.StringVar(value="buy")
-        frame_action = tk.Frame(right_frame, bg="#333333")
+        frame_action = tk.Frame(right_frame, bg=self.color_card)
         frame_action.pack(fill="x", pady=(2, 12))
 
-        tk.Radiobutton(frame_action, text="Alış", variable=self.var_action, value="buy", bg="#333333", fg="white", selectcolor="#454545", activebackground="#333333", activeforeground="white").pack(side="left", padx=(0, 10))
-        tk.Radiobutton(frame_action, text="Satış", variable=self.var_action, value="sell", bg="#333333", fg="white", selectcolor="#454545", activebackground="#333333", activeforeground="white").pack(side="left")
+        tk.Radiobutton(frame_action, text="Alış", variable=self.var_action, value="buy", bg=self.color_card, fg=self.color_text_main, selectcolor="#1b2430", activebackground=self.color_card, activeforeground=self.color_text_main).pack(side="left", padx=(0, 10))
+        tk.Radiobutton(frame_action, text="Satış", variable=self.var_action, value="sell", bg=self.color_card, fg=self.color_text_main, selectcolor="#1b2430", activebackground=self.color_card, activeforeground=self.color_text_main).pack(side="left")
         
         # 4. Miktar
         self.lbl_amount = tk.Label(right_frame, text="Miktar", **style_label)
@@ -845,17 +876,17 @@ class PortfolioManagerDialog(tk.Toplevel):
         # 5. Para Birimi
         tk.Label(right_frame, text="Para Birimi", **style_label).pack(anchor="w")
         self.var_currency = tk.StringVar(value="TL")
-        frame_radio = tk.Frame(right_frame, bg="#333333")
+        frame_radio = tk.Frame(right_frame, bg=self.color_card)
         frame_radio.pack(fill="x", pady=(2, 12))
         
-        r1 = tk.Radiobutton(frame_radio, text="TL", variable=self.var_currency, value="TL", bg="#333333", fg="white", selectcolor="#454545", activebackground="#333333", activeforeground="white", command=self.toggle_rate_entry)
+        r1 = tk.Radiobutton(frame_radio, text="TL", variable=self.var_currency, value="TL", bg=self.color_card, fg=self.color_text_main, selectcolor="#1b2430", activebackground=self.color_card, activeforeground=self.color_text_main, command=self.toggle_rate_entry)
         r1.pack(side="left", padx=(0, 10))
         
-        r2 = tk.Radiobutton(frame_radio, text="USD", variable=self.var_currency, value="USD", bg="#333333", fg="white", selectcolor="#454545", activebackground="#333333", activeforeground="white", command=self.toggle_rate_entry)
+        r2 = tk.Radiobutton(frame_radio, text="USD", variable=self.var_currency, value="USD", bg=self.color_card, fg=self.color_text_main, selectcolor="#1b2430", activebackground=self.color_card, activeforeground=self.color_text_main, command=self.toggle_rate_entry)
         r2.pack(side="left")
         
         # 6. Kur (Sadece USD seçiliyse görünür)
-        self.frame_rate = tk.Frame(right_frame, bg="#333333")
+        self.frame_rate = tk.Frame(right_frame, bg=self.color_card)
         self.frame_rate.pack(fill="x")
         
         tk.Label(self.frame_rate, text="İşlem Kuru (USD/TL)", **style_label).pack(anchor="w")
@@ -869,9 +900,11 @@ class PortfolioManagerDialog(tk.Toplevel):
         self.entry_total = tk.Entry(right_frame, **style_entry)
         self.entry_total.pack(fill="x", ipady=5, pady=(2, 12))
         
-        # Ekle Butonu
-        btn_add = tk.Button(right_frame, text="EKLE", bg="#007acc", fg="white", font=("Segoe UI", 10, "bold"), relief="flat", cursor="hand2", command=self.save)
-        btn_add.pack(fill="x", pady=20, ipady=8)
+        # Ekle/Güncelle Butonları
+        self.btn_save = tk.Button(right_frame, text="EKLE", bg=self.color_accent, fg="white", font=("Segoe UI", 10, "bold"), relief="flat", cursor="hand2", command=self.save)
+        self.btn_save.pack(fill="x", pady=(18, 8), ipady=8)
+
+        self.btn_cancel_edit = tk.Button(right_frame, text="DÜZENLEMEYİ İPTAL ET", bg=self.color_card_alt, fg=self.color_text_dim, font=("Segoe UI", 9, "bold"), relief="flat", cursor="hand2", command=self.cancel_edit)
         
         self.update_amount_label()
         self.toggle_rate_entry() # İlk durum ayarı
@@ -913,6 +946,7 @@ class PortfolioManagerDialog(tk.Toplevel):
                 label,
                 f"{transaction['quantity']:.2f} {unit}",
                 total_str,
+                "✎",
                 "🗑️",
             ))
 
@@ -920,10 +954,61 @@ class PortfolioManagerDialog(tk.Toplevel):
         region = self.tree.identify("region", event.x, event.y)
         if region == "cell":
             column = self.tree.identify_column(event.x)
-            if column == "#6": # Delete column
+            if column == "#6": # Edit column
+                item_id = self.tree.identify_row(event.y)
+                if item_id:
+                    self.start_edit(item_id)
+            elif column == "#7": # Delete column
                 item_id = self.tree.identify_row(event.y)
                 if item_id:
                     self.delete_transaction(item_id)
+
+    def start_edit(self, item_id):
+        idx = int(item_id)
+        if idx < 0 or idx >= len(self.manager.transactions):
+            return
+        transaction = self.manager.normalize_transaction(self.manager.transactions[idx])
+        instrument = self.instrument_by_key.get(transaction["instrument_key"])
+        if instrument:
+            self.var_instrument.set(instrument["label"])
+            self.update_amount_label()
+
+        self.entry_date.delete(0, 'end')
+        self.entry_date.insert(0, transaction["date"])
+        self.var_action.set(transaction["action"])
+        self.entry_amount.delete(0, 'end')
+        self.entry_amount.insert(0, f"{transaction['quantity']:.4f}".rstrip("0").rstrip("."))
+        self.var_currency.set(transaction["currency"])
+        self.toggle_rate_entry()
+        self.entry_total.delete(0, 'end')
+        if transaction["currency"] == "USD":
+            self.entry_total.insert(0, f"{transaction['total_usd']:.2f}")
+            self.entry_rate.delete(0, 'end')
+            self.entry_rate.insert(0, f"{transaction['fx_rate'] or self.current_dollar_rate:.4f}")
+        else:
+            self.entry_total.insert(0, f"{transaction['total_tl']:.2f}")
+
+        self.edit_index = idx
+        self.var_form_title.set("İşlemi Düzenle")
+        self.btn_save.config(text="GÜNCELLE")
+        if not self.btn_cancel_edit.winfo_ismapped():
+            self.btn_cancel_edit.pack(fill="x", pady=(0, 8), ipady=6)
+
+    def cancel_edit(self):
+        self.edit_index = None
+        self.var_form_title.set("Yeni İşlem")
+        self.btn_save.config(text="EKLE")
+        self.btn_cancel_edit.pack_forget()
+        self.clear_form()
+
+    def clear_form(self):
+        self.entry_amount.delete(0, 'end')
+        self.entry_total.delete(0, 'end')
+        self.entry_date.delete(0, 'end')
+        self.entry_date.insert(0, datetime.now().strftime("%d-%m-%Y"))
+        self.var_action.set("buy")
+        self.var_currency.set("TL")
+        self.toggle_rate_entry()
 
     def delete_transaction(self, item_id):
         idx = int(item_id)
@@ -936,6 +1021,10 @@ class PortfolioManagerDialog(tk.Toplevel):
         if tk.messagebox.askyesno("Onay", msg, parent=self):
             del self.manager.transactions[idx]
             self.manager.save_all()
+            if self.edit_index == idx:
+                self.cancel_edit()
+            elif self.edit_index is not None and self.edit_index > idx:
+                self.edit_index -= 1
             self.load_list()
             self.on_save_callback()
 
@@ -977,13 +1066,19 @@ class PortfolioManagerDialog(tk.Toplevel):
                 data["total_usd"] = 0
                 data["fx_rate"] = 0
             
-            self.manager.save(data)
+            if self.edit_index is None:
+                self.manager.save(data)
+            else:
+                self.manager.replace(self.edit_index, data)
+                self.edit_index = None
+                self.var_form_title.set("Yeni İşlem")
+                self.btn_save.config(text="EKLE")
+                self.btn_cancel_edit.pack_forget()
             self.load_list()
             self.on_save_callback()
             
             # Formu temizle
-            self.entry_amount.delete(0, 'end')
-            self.entry_total.delete(0, 'end')
+            self.clear_form()
             
         except ValueError as e:
             message = str(e) if str(e) else "Lütfen geçerli sayısal değerler giriniz."
@@ -1203,23 +1298,34 @@ class PiyasaWidget:
         self.root.bind("<ButtonRelease-1>", self._on_button_release)
         
         # Sağ Tık Menüsü
-        self.menu = tk.Menu(self.root, tearoff=0)
+        menu_style = {
+            "bg": self.color_card_alt,
+            "fg": self.color_text_main,
+            "activebackground": self.color_accent,
+            "activeforeground": "#ffffff",
+            "disabledforeground": self.color_text_muted,
+            "bd": 0,
+            "relief": "flat",
+        }
+        self.menu = tk.Menu(self.root, tearoff=0, **menu_style)
         self.menu.add_command(label="Kapat", command=self.kapat)
         self.root.bind("<Button-3>", self.show_menu)
 
         # Ayarlar Menüsü (çark simgesi)
         self.var_autostart = tk.BooleanVar(value=self.asm.is_enabled())
         self.var_topmost = tk.BooleanVar(value=self.default_topmost)
-        self.settings_menu = tk.Menu(self.root, tearoff=0)
+        self.settings_menu = tk.Menu(self.root, tearoff=0, **menu_style)
         self.settings_menu.add_checkbutton(
             label="Windows ile başlat",
             variable=self.var_autostart,
-            command=self.toggle_autostart
+            command=self.toggle_autostart,
+            selectcolor=self.color_card
         )
         self.settings_menu.add_checkbutton(
             label="Her zaman üstte",
             variable=self.var_topmost,
-            command=self.toggle_topmost
+            command=self.toggle_topmost,
+            selectcolor=self.color_card
         )
         self.settings_menu.add_separator()
         self.settings_menu.add_command(label="İzlenenleri düzenle", command=self.open_watchlist_settings)

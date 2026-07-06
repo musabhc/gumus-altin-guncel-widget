@@ -231,6 +231,19 @@ class TestMultiAssetPortfolio(unittest.TestCase):
             with self.assertRaises(ValueError):
                 manager.save({"date": "03-01-2026", "instrument_key": "thyao", "instrument_label": "THYAO", "action": "sell", "quantity": 7, "currency": "TL", "total_tl": 700})
 
+    def test_replace_updates_transaction_and_validates_sell_quantity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = main.TransactionManager(os.path.join(tmp, "transactions.json"))
+            manager.save({"date": "01-01-2026", "instrument_key": "thyao", "instrument_label": "THYAO", "action": "buy", "quantity": 10, "currency": "TL", "total_tl": 1000})
+            manager.save({"date": "02-01-2026", "instrument_key": "thyao", "instrument_label": "THYAO", "action": "sell", "quantity": 2, "currency": "TL", "total_tl": 300})
+
+            manager.replace(0, {"date": "01-01-2026", "instrument_key": "thyao", "instrument_label": "THYAO", "action": "buy", "quantity": 12, "currency": "TL", "total_tl": 1200})
+            summary = manager.get_portfolio_summary({"thyao": 150}, main.default_watchlist())
+
+            self.assertEqual(summary["rows"][0]["quantity"], 10)
+            with self.assertRaises(ValueError):
+                manager.replace(1, {"date": "02-01-2026", "instrument_key": "thyao", "instrument_label": "THYAO", "action": "sell", "quantity": 13, "currency": "TL", "total_tl": 1300})
+
     def test_missing_price_keeps_asset_row_but_counts_zero(self):
         with tempfile.TemporaryDirectory() as tmp:
             manager = main.TransactionManager(os.path.join(tmp, "transactions.json"))
