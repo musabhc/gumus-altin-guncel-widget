@@ -1,4 +1,5 @@
 /transactions.json
+/watchlist.json
 __pycache__/
 .pyc
 market_history.db

@@ -25,10 +25,297 @@ try:
 except ImportError:
     VERSION = "0.0.0-dev"
 
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+TROY_OUNCE_GRAMS = 31.1035
+
+DEFAULT_WATCHLIST = [
+    {
+        "key": "gumus_ons",
+        "label": "Gümüş ONS",
+        "symbol": "SI=F",
+        "currency": "$",
+        "decimals": 2,
+        "color": "#ffffff",
+        "source": "direct",
+    },
+    {
+        "key": "gumus_tl",
+        "label": "Gümüş TL",
+        "symbol": "SI=F",
+        "currency": "₺",
+        "decimals": 2,
+        "color": "#ffffff",
+        "source": "metal_try",
+    },
+    {
+        "key": "altin_tl",
+        "label": "Altın TL",
+        "symbol": "GC=F",
+        "currency": "₺",
+        "decimals": 0,
+        "color": "#d4af37",
+        "source": "metal_try",
+    },
+    {
+        "key": "dolar",
+        "label": "Dolar",
+        "symbol": "TRY=X",
+        "currency": "₺",
+        "decimals": 2,
+        "color": "#2ecc71",
+        "source": "direct",
+    },
+    {
+        "key": "thyao",
+        "label": "THYAO",
+        "symbol": "THYAO.IS",
+        "currency": "₺",
+        "decimals": 2,
+        "color": "#2196f3",
+        "source": "direct",
+    },
+]
+
+LEGACY_MARKET_FIELDS = {
+    "ons_gumus": "gumus_ons",
+    "gram_gumus_tl": "gumus_tl",
+    "gram_altin_tl": "altin_tl",
+    "dolar": "dolar",
+}
+
+
+def app_path(filename):
+    return os.path.join(APP_DIR, filename)
+
+
+def default_watchlist():
+    return [dict(item) for item in DEFAULT_WATCHLIST]
+
+
+def make_watchlist_key(label, symbol):
+    raw = (symbol or label or "asset").lower()
+    chars = []
+    for ch in raw:
+        if ch.isalnum():
+            chars.append(ch)
+        elif ch in (".", "-", "=", "_", " "):
+            chars.append("_")
+    key = "".join(chars).strip("_")
+    return key or "asset"
+
+
+def normalize_instrument(item, fallback_index=0):
+    item = dict(item or {})
+    label = str(item.get("label") or item.get("name") or item.get("symbol") or f"Varlık {fallback_index + 1}").strip()
+    symbol = str(item.get("symbol") or "").strip().upper()
+    key = str(item.get("key") or make_watchlist_key(label, symbol)).strip()
+    if not symbol:
+        symbol = key.upper()
+    try:
+        decimals = int(item.get("decimals", 2))
+    except (TypeError, ValueError):
+        decimals = 2
+    decimals = max(0, min(decimals, 6))
+    return {
+        "key": key,
+        "label": label,
+        "symbol": symbol,
+        "currency": str(item.get("currency", "₺")),
+        "decimals": decimals,
+        "color": str(item.get("color") or "#2196f3"),
+        "source": str(item.get("source") or "direct"),
+    }
+
+
+def normalize_market_data(data):
+    if not isinstance(data, dict):
+        return None
+
+    prices = {}
+    raw_prices = data.get("prices")
+    if isinstance(raw_prices, dict):
+        for key, value in raw_prices.items():
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                prices[str(key)] = value
+
+    for legacy_key, new_key in LEGACY_MARKET_FIELDS.items():
+        if new_key in prices:
+            continue
+        try:
+            value = float(data.get(legacy_key, 0))
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            prices[new_key] = value
+
+    normalized = {
+        "prices": prices,
+        "timestamp": data.get("timestamp", ""),
+    }
+    for legacy_key, new_key in LEGACY_MARKET_FIELDS.items():
+        if new_key in prices:
+            normalized[legacy_key] = prices[new_key]
+    return normalized
+
+
+def market_data_for_save(prices, timestamp=None):
+    data = {
+        "prices": {str(key): float(value) for key, value in prices.items() if value and value > 0},
+        "timestamp": timestamp or time.strftime("%d.%m %H:%M"),
+    }
+    for legacy_key, new_key in LEGACY_MARKET_FIELDS.items():
+        if new_key in data["prices"]:
+            data[legacy_key] = data["prices"][new_key]
+    return data
+
+
+def format_instrument_value(instrument, value):
+    if value is None:
+        return "..."
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return "..."
+    decimals = int(instrument.get("decimals", 2))
+    prefix = instrument.get("currency", "")
+    return f"{prefix}{value:,.{decimals}f}"
+
+
+def safe_float(value, default=0.0):
+    try:
+        return float(str(value).replace(',', '.'))
+    except (TypeError, ValueError):
+        return default
+
+
+def portfolio_unit(instrument):
+    key = instrument.get("key", "")
+    source = instrument.get("source", "")
+    if key in ("gumus_tl", "altin_tl") or source == "metal_try":
+        return "g"
+    if key == "dolar" or instrument.get("symbol") == "TRY=X":
+        return "USD"
+    return "adet"
+
+
+def portfolio_instruments(watchlist):
+    # Gümüş ONS referans fiyat; portföyde gram gümüş için Gümüş TL kullanılır.
+    return [item for item in watchlist if item.get("key") != "gumus_ons"]
+
+
+def price_to_tl(instrument, prices):
+    price = prices.get(instrument.get("key"))
+    if price is None:
+        return None
+    price = safe_float(price, None)
+    if price is None or price <= 0:
+        return None
+    currency = instrument.get("currency", "₺")
+    if currency == "$":
+        dolar = safe_float(prices.get("dolar"), 0)
+        if dolar <= 0:
+            return None
+        return price * dolar
+    return price
+
+
+def log_message(message):
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        print(str(message).encode("ascii", "replace").decode("ascii"))
+
+
+class WatchlistManager:
+    def __init__(self, filename="watchlist.json"):
+        self.filename = filename
+        self.filepath = filename if os.path.isabs(filename) else app_path(filename)
+        self.instruments = self.load()
+
+    def load(self):
+        if not os.path.exists(self.filepath):
+            return default_watchlist()
+        try:
+            with open(self.filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                data = data.get("instruments", [])
+            if not isinstance(data, list):
+                return default_watchlist()
+
+            instruments = []
+            seen_keys = set()
+            for idx, item in enumerate(data):
+                instrument = normalize_instrument(item, idx)
+                key = instrument["key"]
+                if key in seen_keys:
+                    base = key
+                    suffix = 2
+                    while f"{base}_{suffix}" in seen_keys:
+                        suffix += 1
+                    instrument["key"] = f"{base}_{suffix}"
+                seen_keys.add(instrument["key"])
+                instruments.append(instrument)
+            return instruments or default_watchlist()
+        except Exception as e:
+            log_message(f"İzleme listesi okuma hatası: {e}")
+            return default_watchlist()
+
+    def save_all(self):
+        with open(self.filepath, 'w', encoding='utf-8') as f:
+            json.dump({"instruments": self.instruments}, f, indent=4, ensure_ascii=False)
+
+    def has_symbol(self, symbol):
+        symbol = symbol.strip().upper()
+        return any(item["symbol"].upper() == symbol for item in self.instruments)
+
+    def add(self, label, symbol, currency="₺"):
+        label = label.strip()
+        symbol = symbol.strip().upper()
+        if not label or not symbol:
+            raise ValueError("Görünen ad ve sembol zorunlu.")
+        if self.has_symbol(symbol):
+            raise ValueError("Bu sembol zaten izleme listesinde.")
+
+        key = make_watchlist_key(label, symbol)
+        existing_keys = {item["key"] for item in self.instruments}
+        if key in existing_keys:
+            base = key
+            suffix = 2
+            while f"{base}_{suffix}" in existing_keys:
+                suffix += 1
+            key = f"{base}_{suffix}"
+
+        instrument = normalize_instrument({
+            "key": key,
+            "label": label,
+            "symbol": symbol,
+            "currency": currency or "",
+            "decimals": 2,
+            "color": "#2196f3",
+            "source": "direct",
+        })
+        self.instruments.append(instrument)
+        self.save_all()
+        return instrument
+
+    def remove(self, key):
+        if len(self.instruments) <= 1:
+            raise ValueError("En az bir varlık izleme listesinde kalmalı.")
+        original_count = len(self.instruments)
+        self.instruments = [item for item in self.instruments if item["key"] != key]
+        if len(self.instruments) == original_count:
+            raise ValueError("Silinecek sembol bulunamadı.")
+        self.save_all()
+
 
 class TransactionManager:
     def __init__(self, filename="transactions.json"):
-        self.filename = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+        self.filename = filename if os.path.isabs(filename) else app_path(filename)
         self.transactions = self.load()
 
     def load(self):
@@ -41,41 +328,188 @@ class TransactionManager:
             return []
 
     def save(self, transaction):
+        normalized = self.normalize_transaction(transaction)
+        if normalized["action"] == "sell":
+            current_qty = self.get_position_quantity(normalized["instrument_key"])
+            if normalized["quantity"] > current_qty + 1e-9:
+                raise ValueError("Satış miktarı mevcut miktardan büyük olamaz.")
         self.transactions.append(transaction)
         self.save_all()
         
     def save_all(self):
         with open(self.filename, 'w', encoding='utf-8') as f:
-            json.dump(self.transactions, f, indent=4)
-            
+            json.dump(self.transactions, f, indent=4, ensure_ascii=False)
+
+    @staticmethod
+    def normalize_transaction(transaction):
+        t = dict(transaction or {})
+        instrument_key = str(t.get("instrument_key") or "gumus_tl")
+        action = str(t.get("action") or "buy").lower()
+        if action not in ("buy", "sell"):
+            action = "buy"
+
+        quantity = safe_float(t.get("quantity", t.get("amount_g", 0)))
+        total_tl = safe_float(t.get("total_tl", 0))
+        total_usd = safe_float(t.get("total_usd", 0))
+        fx_rate = safe_float(t.get("fx_rate", 0))
+        if not fx_rate and total_usd > 0 and total_tl > 0:
+            fx_rate = total_tl / total_usd
+
+        return {
+            "date": t.get("date", ""),
+            "instrument_key": instrument_key,
+            "instrument_label": t.get("instrument_label", instrument_key),
+            "action": action,
+            "quantity": quantity,
+            "currency": t.get("currency", "TL"),
+            "total_tl": total_tl,
+            "total_usd": total_usd,
+            "fx_rate": fx_rate,
+        }
+
+    def get_position_quantity(self, instrument_key):
+        positions = self.get_positions()
+        return positions.get(instrument_key, {}).get("quantity", 0.0)
+
+    def get_positions(self):
+        positions = {}
+        for transaction in self.transactions:
+            t = self.normalize_transaction(transaction)
+            key = t["instrument_key"]
+            qty = t["quantity"]
+            total_tl = t["total_tl"]
+            if qty <= 0:
+                continue
+
+            position = positions.setdefault(key, {
+                "quantity": 0.0,
+                "cost_basis_tl": 0.0,
+                "realized_profit_tl": 0.0,
+                "instrument_label": t.get("instrument_label", key),
+            })
+
+            if t["action"] == "buy":
+                position["quantity"] += qty
+                position["cost_basis_tl"] += total_tl
+            else:
+                if position["quantity"] <= 0:
+                    continue
+                sell_qty = min(qty, position["quantity"])
+                avg_cost = position["cost_basis_tl"] / position["quantity"] if position["quantity"] else 0
+                removed_cost = avg_cost * sell_qty
+                sale_value = total_tl * (sell_qty / qty) if qty else 0
+                position["quantity"] -= sell_qty
+                position["cost_basis_tl"] -= removed_cost
+                position["realized_profit_tl"] += sale_value - removed_cost
+                if position["quantity"] <= 1e-9:
+                    position["quantity"] = 0.0
+                    position["cost_basis_tl"] = 0.0
+        return positions
+
+    def get_portfolio_summary(self, prices, instruments):
+        prices = prices or {}
+        instrument_map = {item["key"]: item for item in instruments}
+        positions = self.get_positions()
+        rows = []
+        total_value = 0.0
+        total_cost = 0.0
+
+        for key, position in positions.items():
+            quantity = position["quantity"]
+            if quantity <= 1e-9:
+                continue
+            instrument = instrument_map.get(key, {
+                "key": key,
+                "label": position.get("instrument_label", key),
+                "currency": "₺",
+                "decimals": 2,
+                "color": "#2196f3",
+            })
+            unit = portfolio_unit(instrument)
+            current_price_tl = price_to_tl(instrument, prices)
+            cost_basis = position["cost_basis_tl"]
+            value_tl = quantity * current_price_tl if current_price_tl is not None else 0.0
+            profit_tl = value_tl - cost_basis if current_price_tl is not None else None
+            profit_pct = (profit_tl / cost_basis) * 100 if profit_tl is not None and cost_basis > 0 else None
+
+            total_value += value_tl
+            total_cost += cost_basis
+            rows.append({
+                "key": key,
+                "label": instrument.get("label", key),
+                "quantity": quantity,
+                "unit": unit,
+                "cost_basis_tl": cost_basis,
+                "current_price_tl": current_price_tl,
+                "value_tl": value_tl,
+                "profit_tl": profit_tl,
+                "profit_pct": profit_pct,
+                "has_price": current_price_tl is not None,
+                "color": instrument.get("color", "#2196f3"),
+            })
+
+        unrealized_profit = total_value - total_cost if total_cost > 0 else 0.0
+        unrealized_profit_pct = (unrealized_profit / total_cost) * 100 if total_cost > 0 else 0.0
+        rows.sort(key=lambda item: item["value_tl"], reverse=True)
+        return {
+            "total_value_tl": total_value,
+            "total_cost_tl": total_cost,
+            "profit_tl": unrealized_profit,
+            "profit_pct": unrealized_profit_pct,
+            "rows": rows,
+        }
+
     def get_summary(self):
-        total_investment = sum(t['total_tl'] for t in self.transactions)
-        total_gumus = sum(t['amount_g'] for t in self.transactions)
+        positions = self.get_positions()
+        gumus = positions.get("gumus_tl", {})
+        total_investment = gumus.get("cost_basis_tl", 0.0)
+        total_gumus = gumus.get("quantity", 0.0)
         return total_investment, total_gumus
 
 
 class MarketHistoryDB:
     def __init__(self, db_name="market_history.db"):
-        self.db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), db_name)
+        self.db_path = db_name if os.path.isabs(db_name) else app_path(db_name)
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._create_table()
         self.cleanup_bad_records()
+        self._migrate_legacy_history()
 
     def _create_table(self):
         self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS market_history (
+            CREATE TABLE IF NOT EXISTS market_price_history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL,
-                ons_gumus REAL,
-                gram_gumus_tl REAL,
-                gram_altin_tl REAL,
-                dolar REAL
+                instrument_key TEXT NOT NULL,
+                label TEXT,
+                price REAL NOT NULL
             )
+        """)
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_market_price_history_key_time
+            ON market_price_history (instrument_key, timestamp)
         """)
         self.conn.commit()
 
+    def _table_exists(self, table_name):
+        cursor = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,)
+        )
+        return cursor.fetchone() is not None
+
     def cleanup_bad_records(self):
         """Veritabanındaki sıfır veya None değerli bozuk kayıtları temizle."""
+        try:
+            self.conn.execute(
+                "DELETE FROM market_price_history WHERE price IS NULL OR price <= 0"
+            )
+            self.conn.commit()
+        except Exception as e:
+            log_message(f"Dinamik geçmiş temizlik hatası: {e}")
+
+        if not self._table_exists("market_history"):
+            return
         try:
             deleted = self.conn.execute(
                 "DELETE FROM market_history WHERE ons_gumus IS NULL OR ons_gumus <= 0 "
@@ -85,74 +519,141 @@ class MarketHistoryDB:
             ).rowcount
             if deleted > 0:
                 self.conn.commit()
-                print(f"Veritabanından {deleted} bozuk kayıt temizlendi.")
+                log_message(f"Veritabanından {deleted} bozuk kayıt temizlendi.")
         except Exception as e:
-            print(f"Temizlik hatası: {e}")
+            log_message(f"Temizlik hatası: {e}")
+
+    def _migrate_legacy_history(self):
+        if not self._table_exists("market_history"):
+            return
+
+        try:
+            existing = self.conn.execute(
+                "SELECT COUNT(*) FROM market_price_history"
+            ).fetchone()[0]
+            if existing:
+                return
+
+            rows = self.conn.execute(
+                "SELECT timestamp, ons_gumus, gram_gumus_tl, gram_altin_tl, dolar "
+                "FROM market_history ORDER BY timestamp"
+            ).fetchall()
+            migrated = 0
+            legacy_labels = {
+                "gumus_ons": "Gümüş ONS",
+                "gumus_tl": "Gümüş TL",
+                "altin_tl": "Altın TL",
+                "dolar": "Dolar",
+            }
+            for timestamp, ons_gumus, gram_gumus_tl, gram_altin_tl, dolar in rows:
+                values = {
+                    "gumus_ons": ons_gumus,
+                    "gumus_tl": gram_gumus_tl,
+                    "altin_tl": gram_altin_tl,
+                    "dolar": dolar,
+                }
+                for key, value in values.items():
+                    if value and value > 0:
+                        self.conn.execute(
+                            "INSERT INTO market_price_history (timestamp, instrument_key, label, price) "
+                            "VALUES (?, ?, ?, ?)",
+                            (timestamp, key, legacy_labels[key], float(value))
+                        )
+                        migrated += 1
+            if migrated:
+                self.conn.commit()
+                log_message(f"{migrated} legacy fiyat kaydi dinamik gecmise tasindi.")
+        except Exception as e:
+            log_message(f"Legacy gecmis tasima hatasi: {e}")
 
     def insert(self, ons_gumus, gram_gumus_tl, gram_altin_tl, dolar):
-        # Sıfır veya None değerleri kaydetme
-        if not all(v and v > 0 for v in [ons_gumus, gram_gumus_tl, gram_altin_tl, dolar]):
-            print(f"Geçersiz veri atlandı: ons={ons_gumus}, gumus_tl={gram_gumus_tl}, altin_tl={gram_altin_tl}, dolar={dolar}")
-            return
-        self.conn.execute(
-            "INSERT INTO market_history (timestamp, ons_gumus, gram_gumus_tl, gram_altin_tl, dolar) VALUES (?, ?, ?, ?, ?)",
-            (datetime.now().isoformat(), ons_gumus, gram_gumus_tl, gram_altin_tl, dolar)
-        )
-        self.conn.commit()
+        prices = {
+            "gumus_ons": ons_gumus,
+            "gumus_tl": gram_gumus_tl,
+            "altin_tl": gram_altin_tl,
+            "dolar": dolar,
+        }
+        self.insert_prices(prices, default_watchlist())
 
-    def get_history(self, days=7):
+    def insert_prices(self, prices, instruments=None, timestamp=None):
+        if not prices:
+            return
+        timestamp = timestamp or datetime.now().isoformat()
+        instrument_map = {item["key"]: item for item in (instruments or [])}
+        inserted = 0
+        for key, value in prices.items():
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if value <= 0:
+                continue
+            label = instrument_map.get(key, {}).get("label", key)
+            self.conn.execute(
+                "INSERT INTO market_price_history (timestamp, instrument_key, label, price) VALUES (?, ?, ?, ?)",
+                (timestamp, key, label, value)
+            )
+            inserted += 1
+        if inserted:
+            self.conn.commit()
+
+    def get_history(self, instrument_key="gumus_tl", days=7):
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
         cursor = self.conn.execute(
-            "SELECT timestamp, ons_gumus, gram_gumus_tl, gram_altin_tl, dolar FROM market_history "
-            "WHERE timestamp >= ? AND gram_gumus_tl > 0 AND gram_altin_tl > 0 AND dolar > 0 "
+            "SELECT timestamp, price FROM market_price_history "
+            "WHERE instrument_key = ? AND timestamp >= ? AND price > 0 "
             "ORDER BY timestamp",
-            (cutoff,)
+            (instrument_key, cutoff)
         )
         return cursor.fetchall()
 
-    def get_all_history(self):
+    def get_all_history(self, instrument_key="gumus_tl"):
         cursor = self.conn.execute(
-            "SELECT timestamp, ons_gumus, gram_gumus_tl, gram_altin_tl, dolar FROM market_history "
-            "WHERE gram_gumus_tl > 0 AND gram_altin_tl > 0 AND dolar > 0 "
-            "ORDER BY timestamp"
+            "SELECT timestamp, price FROM market_price_history "
+            "WHERE instrument_key = ? AND price > 0 ORDER BY timestamp",
+            (instrument_key,)
         )
         return cursor.fetchall()
 
-    def get_stats(self, days=None):
-        valid_filter = "AND gram_gumus_tl > 0 AND gram_altin_tl > 0 AND dolar > 0"
+    def get_stats(self, instrument_key="gumus_tl", days=None):
         if days:
             cutoff = (datetime.now() - timedelta(days=days)).isoformat()
-            cursor = self.conn.execute(f"""
-                SELECT MIN(gram_gumus_tl), MAX(gram_gumus_tl), AVG(gram_gumus_tl),
-                       MIN(gram_altin_tl), MAX(gram_altin_tl), AVG(gram_altin_tl),
-                       MIN(dolar), MAX(dolar), AVG(dolar), COUNT(*)
-                FROM market_history WHERE timestamp >= ? {valid_filter}
-            """, (cutoff,))
+            cursor = self.conn.execute("""
+                SELECT MIN(price), MAX(price), AVG(price), COUNT(*)
+                FROM market_price_history
+                WHERE instrument_key = ? AND timestamp >= ? AND price > 0
+            """, (instrument_key, cutoff))
         else:
-            cursor = self.conn.execute(f"""
-                SELECT MIN(gram_gumus_tl), MAX(gram_gumus_tl), AVG(gram_gumus_tl),
-                       MIN(gram_altin_tl), MAX(gram_altin_tl), AVG(gram_altin_tl),
-                       MIN(dolar), MAX(dolar), AVG(dolar), COUNT(*)
-                FROM market_history WHERE 1=1 {valid_filter}
-            """)
+            cursor = self.conn.execute("""
+                SELECT MIN(price), MAX(price), AVG(price), COUNT(*)
+                FROM market_price_history
+                WHERE instrument_key = ? AND price > 0
+            """, (instrument_key,))
         return cursor.fetchone()
 
-    def get_first_last(self, days=None):
-        valid_filter = "AND gram_gumus_tl > 0 AND gram_altin_tl > 0 AND dolar > 0"
+    def get_first_last(self, instrument_key="gumus_tl", days=None):
         if days:
             cutoff = (datetime.now() - timedelta(days=days)).isoformat()
             first = self.conn.execute(
-                f"SELECT gram_gumus_tl, gram_altin_tl, dolar FROM market_history WHERE timestamp >= ? {valid_filter} ORDER BY timestamp ASC LIMIT 1", (cutoff,)
+                "SELECT price FROM market_price_history "
+                "WHERE instrument_key = ? AND timestamp >= ? AND price > 0 ORDER BY timestamp ASC LIMIT 1",
+                (instrument_key, cutoff)
             ).fetchone()
             last = self.conn.execute(
-                f"SELECT gram_gumus_tl, gram_altin_tl, dolar FROM market_history WHERE timestamp >= ? {valid_filter} ORDER BY timestamp DESC LIMIT 1", (cutoff,)
+                "SELECT price FROM market_price_history "
+                "WHERE instrument_key = ? AND timestamp >= ? AND price > 0 ORDER BY timestamp DESC LIMIT 1",
+                (instrument_key, cutoff)
             ).fetchone()
         else:
             first = self.conn.execute(
-                f"SELECT gram_gumus_tl, gram_altin_tl, dolar FROM market_history WHERE 1=1 {valid_filter} ORDER BY timestamp ASC LIMIT 1"
+                "SELECT price FROM market_price_history "
+                "WHERE instrument_key = ? AND price > 0 ORDER BY timestamp ASC LIMIT 1",
+                (instrument_key,)
             ).fetchone()
             last = self.conn.execute(
-                f"SELECT gram_gumus_tl, gram_altin_tl, dolar FROM market_history WHERE 1=1 {valid_filter} ORDER BY timestamp DESC LIMIT 1"
+                "SELECT price FROM market_price_history "
+                "WHERE instrument_key = ? AND price > 0 ORDER BY timestamp DESC LIMIT 1",
+                (instrument_key,)
             ).fetchone()
         return first, last
 
@@ -220,7 +721,7 @@ class UpdateManager:
                     return True, latest_tag, download_url
             return False, None, None
         except Exception as e:
-            print(f"Update Check Error: {e}")
+            log_message(f"Update Check Error: {e}")
             return False, None, None
 
     def update_application(self, download_url):
@@ -240,13 +741,16 @@ class UpdateManager:
             return False
 
 class PortfolioManagerDialog(tk.Toplevel):
-    def __init__(self, parent, manager, on_save_callback, current_dollar_rate):
+    def __init__(self, parent, manager, on_save_callback, current_dollar_rate, instruments):
         super().__init__(parent)
         self.manager = manager
         self.on_save_callback = on_save_callback
         self.current_dollar_rate = current_dollar_rate
+        self.instruments = portfolio_instruments(instruments)
+        self.instrument_by_key = {item["key"]: item for item in self.instruments}
+        self.instrument_label_to_key = {item["label"]: item["key"] for item in self.instruments}
         self.title("Portföy Yönetimi")
-        self.geometry("750x500")
+        self.geometry("860x520")
         self.configure(bg="#2d2d2d")
         
         # --- Sol Panel: Liste ---
@@ -264,7 +768,7 @@ class PortfolioManagerDialog(tk.Toplevel):
                         fieldbackground="#3d3d3d", 
                         borderwidth=0,
                         rowheight=25,
-                        font=self.font_nav_arrow)
+                        font=("Segoe UI", 9))
         
         style.configure("Treeview.Heading", 
                         background="#252526", 
@@ -275,18 +779,20 @@ class PortfolioManagerDialog(tk.Toplevel):
         style.map("Treeview", background=[('selected', '#007acc')])
         
         # Treeview
-        columns = ("date", "amount", "cost", "total", "delete")
+        columns = ("date", "action", "asset", "amount", "total", "delete")
         self.tree = ttk.Treeview(left_frame, columns=columns, show="headings", height=15)
         
         self.tree.heading("date", text="Tarih")
-        self.tree.heading("amount", text="Miktar (Gr)")
-        self.tree.heading("cost", text="Birim Maliyet")
+        self.tree.heading("action", text="İşlem")
+        self.tree.heading("asset", text="Varlık")
+        self.tree.heading("amount", text="Miktar")
         self.tree.heading("total", text="Toplam")
         self.tree.heading("delete", text="")
         
         self.tree.column("date", width=90, anchor="center")
+        self.tree.column("action", width=70, anchor="center")
+        self.tree.column("asset", width=110, anchor="w")
         self.tree.column("amount", width=90, anchor="center")
-        self.tree.column("cost", width=90, anchor="center")
         self.tree.column("total", width=110, anchor="center")
         self.tree.column("delete", width=40, anchor="center")
         
@@ -312,13 +818,31 @@ class PortfolioManagerDialog(tk.Toplevel):
         self.entry_date = tk.Entry(right_frame, **style_entry)
         self.entry_date.pack(fill="x", ipady=5, pady=(2, 12))
         self.entry_date.insert(0, datetime.now().strftime("%d-%m-%Y"))
+
+        # 2. Varlık
+        tk.Label(right_frame, text="Varlık", **style_label).pack(anchor="w")
+        default_label = self.instruments[0]["label"] if self.instruments else ""
+        self.var_instrument = tk.StringVar(value=default_label)
+        self.combo_instrument = ttk.Combobox(right_frame, textvariable=self.var_instrument, values=[item["label"] for item in self.instruments], state="readonly")
+        self.combo_instrument.pack(fill="x", ipady=2, pady=(2, 12))
+        self.combo_instrument.bind("<<ComboboxSelected>>", lambda e: self.update_amount_label())
+
+        # 3. İşlem türü
+        tk.Label(right_frame, text="İşlem", **style_label).pack(anchor="w")
+        self.var_action = tk.StringVar(value="buy")
+        frame_action = tk.Frame(right_frame, bg="#333333")
+        frame_action.pack(fill="x", pady=(2, 12))
+
+        tk.Radiobutton(frame_action, text="Alış", variable=self.var_action, value="buy", bg="#333333", fg="white", selectcolor="#454545", activebackground="#333333", activeforeground="white").pack(side="left", padx=(0, 10))
+        tk.Radiobutton(frame_action, text="Satış", variable=self.var_action, value="sell", bg="#333333", fg="white", selectcolor="#454545", activebackground="#333333", activeforeground="white").pack(side="left")
         
-        # 2. Miktar
-        tk.Label(right_frame, text="Miktar (Gram)", **style_label).pack(anchor="w")
+        # 4. Miktar
+        self.lbl_amount = tk.Label(right_frame, text="Miktar", **style_label)
+        self.lbl_amount.pack(anchor="w")
         self.entry_amount = tk.Entry(right_frame, **style_entry)
         self.entry_amount.pack(fill="x", ipady=5, pady=(2, 12))
         
-        # 3. Para Birimi
+        # 5. Para Birimi
         tk.Label(right_frame, text="Para Birimi", **style_label).pack(anchor="w")
         self.var_currency = tk.StringVar(value="TL")
         frame_radio = tk.Frame(right_frame, bg="#333333")
@@ -330,7 +854,7 @@ class PortfolioManagerDialog(tk.Toplevel):
         r2 = tk.Radiobutton(frame_radio, text="USD", variable=self.var_currency, value="USD", bg="#333333", fg="white", selectcolor="#454545", activebackground="#333333", activeforeground="white", command=self.toggle_rate_entry)
         r2.pack(side="left")
         
-        # 4. Kur (Sadece USD seçiliyse görünür)
+        # 6. Kur (Sadece USD seçiliyse görünür)
         self.frame_rate = tk.Frame(right_frame, bg="#333333")
         self.frame_rate.pack(fill="x")
         
@@ -340,7 +864,7 @@ class PortfolioManagerDialog(tk.Toplevel):
         # Varsayılan olarak güncel kuru yazalım ama kullanıcı değiştirebilsin
         self.entry_rate.insert(0, f"{self.current_dollar_rate:.4f}")
         
-        # 5. Toplam Tutar
+        # 7. Toplam Tutar
         tk.Label(right_frame, text="Toplam Tutar", **style_label).pack(anchor="w")
         self.entry_total = tk.Entry(right_frame, **style_entry)
         self.entry_total.pack(fill="x", ipady=5, pady=(2, 12))
@@ -349,8 +873,18 @@ class PortfolioManagerDialog(tk.Toplevel):
         btn_add = tk.Button(right_frame, text="EKLE", bg="#007acc", fg="white", font=("Segoe UI", 10, "bold"), relief="flat", cursor="hand2", command=self.save)
         btn_add.pack(fill="x", pady=20, ipady=8)
         
+        self.update_amount_label()
         self.toggle_rate_entry() # İlk durum ayarı
         self.load_list()
+
+    def selected_instrument(self):
+        key = self.instrument_label_to_key.get(self.var_instrument.get())
+        return self.instrument_by_key.get(key)
+
+    def update_amount_label(self):
+        instrument = self.selected_instrument()
+        unit = portfolio_unit(instrument or {})
+        self.lbl_amount.config(text=f"Miktar ({unit})")
 
     def toggle_rate_entry(self):
         if self.var_currency.get() == "USD":
@@ -363,31 +897,42 @@ class PortfolioManagerDialog(tk.Toplevel):
             self.tree.delete(item)
             
         for i, t in enumerate(self.manager.transactions):
-            currency = t.get("currency", "TL")
-            if currency == "USD":
-                total_str = f"${t.get('total_usd', 0):.2f}"
-                cost_str = f"${t.get('price_usd', 0):.2f}"
+            transaction = self.manager.normalize_transaction(t)
+            instrument = self.instrument_by_key.get(transaction["instrument_key"])
+            label = instrument["label"] if instrument else transaction.get("instrument_label", transaction["instrument_key"])
+            unit = portfolio_unit(instrument or {})
+            action_text = "Alış" if transaction["action"] == "buy" else "Satış"
+            if transaction["currency"] == "USD":
+                total_str = f"${transaction['total_usd']:.2f}"
             else:
-                total_str = f"₺{t.get('total_tl', 0):.2f}"
-                cost_tl = t.get('total_tl', 0) / t.get('amount_g', 1)
-                cost_str = f"₺{cost_tl:.2f}"
+                total_str = f"₺{transaction['total_tl']:.2f}"
                 
-            self.tree.insert("", "end", iid=i, values=(t['date'], f"{t['amount_g']:.2f}", cost_str, total_str, "🗑️"))
+            self.tree.insert("", "end", iid=i, values=(
+                transaction["date"],
+                action_text,
+                label,
+                f"{transaction['quantity']:.2f} {unit}",
+                total_str,
+                "🗑️",
+            ))
 
     def on_click(self, event):
         region = self.tree.identify("region", event.x, event.y)
         if region == "cell":
             column = self.tree.identify_column(event.x)
-            if column == "#5": # Delete column
+            if column == "#6": # Delete column
                 item_id = self.tree.identify_row(event.y)
                 if item_id:
                     self.delete_transaction(item_id)
 
     def delete_transaction(self, item_id):
         idx = int(item_id)
-        t = self.manager.transactions[idx]
+        transaction = self.manager.normalize_transaction(self.manager.transactions[idx])
+        instrument = self.instrument_by_key.get(transaction["instrument_key"], {})
+        label = instrument.get("label", transaction["instrument_key"])
         
-        msg = f"{t['date']} tarihindeki {t['amount_g']:.2f}g miktarında yaptığınız alım silinecektir.\nOnaylıyor musunuz?"
+        action_text = "alış" if transaction["action"] == "buy" else "satış"
+        msg = f"{transaction['date']} tarihindeki {label} {action_text} işlemi silinecektir.\nOnaylıyor musunuz?"
         if tk.messagebox.askyesno("Onay", msg, parent=self):
             del self.manager.transactions[idx]
             self.manager.save_all()
@@ -396,19 +941,28 @@ class PortfolioManagerDialog(tk.Toplevel):
 
     def save(self):
         try:
+            instrument = self.selected_instrument()
+            if not instrument:
+                tk.messagebox.showerror("Hata", "Lütfen bir varlık seçiniz.", parent=self)
+                return
+
             amount = float(self.entry_amount.get().replace(',', '.'))
             total_entered = float(self.entry_total.get().replace(',', '.'))
+            if amount <= 0 or total_entered < 0:
+                raise ValueError("Miktar pozitif, toplam tutar sıfır veya pozitif olmalı.")
             currency = self.var_currency.get()
             
             data = {
                 "date": self.entry_date.get(),
-                "amount_g": amount,
+                "instrument_key": instrument["key"],
+                "instrument_label": instrument["label"],
+                "action": self.var_action.get(),
+                "quantity": amount,
                 "currency": currency
             }
             
             if currency == "USD":
                 data["total_usd"] = total_entered
-                data["price_usd"] = total_entered / amount if amount else 0
                 
                 # Kullanıcının girdiği kur
                 try:
@@ -416,12 +970,12 @@ class PortfolioManagerDialog(tk.Toplevel):
                 except:
                     user_rate = self.current_dollar_rate # Fallback
                 
-                # Banka alım maliyeti (TL) = Toplam USD * Alım Kuru
+                data["fx_rate"] = user_rate
                 data["total_tl"] = total_entered * user_rate
             else:
                 data["total_tl"] = total_entered
                 data["total_usd"] = 0
-                data["price_usd"] = 0
+                data["fx_rate"] = 0
             
             self.manager.save(data)
             self.load_list()
@@ -431,8 +985,165 @@ class PortfolioManagerDialog(tk.Toplevel):
             self.entry_amount.delete(0, 'end')
             self.entry_total.delete(0, 'end')
             
-        except ValueError:
-            tk.messagebox.showerror("Hata", "Lütfen geçerli sayısal değerler giriniz.", parent=self)
+        except ValueError as e:
+            message = str(e) if str(e) else "Lütfen geçerli sayısal değerler giriniz."
+            tk.messagebox.showerror("Hata", message, parent=self)
+
+
+class WatchlistDialog(tk.Toplevel):
+    def __init__(self, parent, manager, on_change_callback, price_validator):
+        super().__init__(parent)
+        self.manager = manager
+        self.on_change_callback = on_change_callback
+        self.price_validator = price_validator
+        self.title("İzlenenler")
+        self.geometry("680x420")
+        self.configure(bg="#2d2d2d")
+
+        left_frame = tk.Frame(self, bg="#2d2d2d", padx=10, pady=10)
+        left_frame.pack(side="left", fill="both", expand=True)
+
+        tk.Label(left_frame, text="İzleme Listesi", bg="#2d2d2d", fg="#cccccc", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 10))
+
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("Watchlist.Treeview",
+                        background="#3d3d3d",
+                        foreground="white",
+                        fieldbackground="#3d3d3d",
+                        borderwidth=0,
+                        rowheight=25,
+                        font=("Segoe UI", 9))
+        style.configure("Watchlist.Treeview.Heading",
+                        background="#252526",
+                        foreground="white",
+                        relief="flat",
+                        font=("Segoe UI", 9, "bold"))
+        style.map("Watchlist.Treeview", background=[('selected', '#007acc')])
+
+        columns = ("label", "symbol", "currency", "delete")
+        self.tree = ttk.Treeview(left_frame, columns=columns, show="headings", height=13, style="Watchlist.Treeview")
+        self.tree.heading("label", text="Ad")
+        self.tree.heading("symbol", text="Yahoo Sembolü")
+        self.tree.heading("currency", text="Birim")
+        self.tree.heading("delete", text="")
+        self.tree.column("label", width=130, anchor="w")
+        self.tree.column("symbol", width=110, anchor="center")
+        self.tree.column("currency", width=60, anchor="center")
+        self.tree.column("delete", width=40, anchor="center")
+        self.tree.pack(side="left", fill="both", expand=True)
+        self.tree.bind("<ButtonRelease-1>", self.on_click)
+
+        scrollbar = ttk.Scrollbar(left_frame, orient="vertical", command=self.tree.yview)
+        scrollbar.pack(side="right", fill="y")
+        self.tree.configure(yscrollcommand=scrollbar.set)
+
+        right_frame = tk.Frame(self, bg="#333333", padx=20, pady=20)
+        right_frame.pack(side="right", fill="y")
+
+        tk.Label(right_frame, text="Yeni Varlık", bg="#333333", fg="white", font=("Segoe UI", 14, "bold")).pack(anchor="w", pady=(0, 16))
+
+        style_entry = {"bg": "#454545", "fg": "white", "insertbackground": "white", "relief": "flat", "font": ("Segoe UI", 10)}
+        style_label = {"bg": "#333333", "fg": "#cccccc", "font": ("Segoe UI", 9)}
+
+        tk.Label(right_frame, text="Görünen Ad", **style_label).pack(anchor="w")
+        self.entry_label = tk.Entry(right_frame, **style_entry)
+        self.entry_label.pack(fill="x", ipady=5, pady=(2, 12))
+
+        tk.Label(right_frame, text="Yahoo Sembolü", **style_label).pack(anchor="w")
+        self.entry_symbol = tk.Entry(right_frame, **style_entry)
+        self.entry_symbol.pack(fill="x", ipady=5, pady=(2, 5))
+        tk.Label(right_frame, text="Örnek: THYAO.IS, AAPL, BTC-USD", bg="#333333", fg="#888888", font=("Segoe UI", 8)).pack(anchor="w", pady=(0, 12))
+
+        tk.Label(right_frame, text="Para Birimi", **style_label).pack(anchor="w")
+        self.var_currency = tk.StringVar(value="₺")
+        self.combo_currency = ttk.Combobox(right_frame, textvariable=self.var_currency, values=["₺", "$", "€", ""], width=10)
+        self.combo_currency.pack(fill="x", ipady=2, pady=(2, 12))
+
+        self.var_status = tk.StringVar(value="")
+        tk.Label(right_frame, textvariable=self.var_status, bg="#333333", fg="#aaaaaa", font=("Segoe UI", 8), wraplength=190, justify="left").pack(fill="x", pady=(0, 8))
+
+        self.btn_add = tk.Button(right_frame, text="EKLE", bg="#007acc", fg="white", font=("Segoe UI", 10, "bold"), relief="flat", cursor="hand2", command=self.add_symbol)
+        self.btn_add.pack(fill="x", pady=10, ipady=8)
+
+        self.load_list()
+
+    def load_list(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for instrument in self.manager.instruments:
+            self.tree.insert("", "end", iid=instrument["key"], values=(
+                instrument["label"],
+                instrument["symbol"],
+                instrument.get("currency", ""),
+                "🗑️",
+            ))
+
+    def on_click(self, event):
+        region = self.tree.identify("region", event.x, event.y)
+        if region != "cell":
+            return
+        column = self.tree.identify_column(event.x)
+        if column != "#4":
+            return
+        item_id = self.tree.identify_row(event.y)
+        if not item_id:
+            return
+        instrument = next((item for item in self.manager.instruments if item["key"] == item_id), None)
+        if not instrument:
+            return
+        msg = f"{instrument['label']} ({instrument['symbol']}) izleme listesinden kaldırılsın mı?"
+        if messagebox.askyesno("Onay", msg, parent=self):
+            try:
+                self.manager.remove(item_id)
+                self.load_list()
+                self.on_change_callback()
+            except ValueError as e:
+                messagebox.showerror("Hata", str(e), parent=self)
+
+    def add_symbol(self):
+        label = self.entry_label.get().strip()
+        symbol = self.entry_symbol.get().strip().upper()
+        currency = self.var_currency.get()
+
+        if not label or not symbol:
+            messagebox.showwarning("Eksik Bilgi", "Görünen ad ve Yahoo sembolü zorunlu.", parent=self)
+            return
+        if self.manager.has_symbol(symbol):
+            messagebox.showwarning("Tekrar", "Bu sembol zaten izleme listesinde.", parent=self)
+            return
+
+        self.btn_add.config(state="disabled")
+        self.var_status.set("Sembol kontrol ediliyor...")
+        threading.Thread(target=self._validate_and_add, args=(label, symbol, currency), daemon=True).start()
+
+    def _validate_and_add(self, label, symbol, currency):
+        error = None
+        try:
+            price = self.price_validator(symbol)
+            if not price or price <= 0:
+                error = "Bu sembol için geçerli fiyat bulunamadı."
+        except Exception as e:
+            error = f"Sembol doğrulanamadı: {e}"
+        self.after(0, lambda: self._finish_add(label, symbol, currency, error))
+
+    def _finish_add(self, label, symbol, currency, error):
+        self.btn_add.config(state="normal")
+        if error:
+            self.var_status.set("")
+            messagebox.showerror("Sembol Eklenemedi", error, parent=self)
+            return
+        try:
+            self.manager.add(label, symbol, currency)
+            self.load_list()
+            self.on_change_callback()
+            self.entry_label.delete(0, 'end')
+            self.entry_symbol.delete(0, 'end')
+            self.var_status.set("Eklendi.")
+        except ValueError as e:
+            self.var_status.set("")
+            messagebox.showerror("Hata", str(e), parent=self)
+
 
 class PiyasaWidget:
     def __init__(self):
@@ -469,12 +1180,14 @@ class PiyasaWidget:
         
         # Başlangıç Konumu (Sağ Üst)
         screen_width = self.root.winfo_screenwidth()
-        self.root.geometry(f"260x300+{screen_width-290}+50")
+        self.root.geometry(f"320x420+{screen_width-350}+50")
         
         # Managers
         self.tm = TransactionManager()
         self.asm = AutoStartManager()
         self.um = UpdateManager(VERSION, GITHUB_REPO)
+        self.watchlist_manager = WatchlistManager()
+        self.watchlist = self.watchlist_manager.instruments
         self.history_db = MarketHistoryDB()
         self.current_page = 0
         self._fetch_lock = threading.Lock()
@@ -508,6 +1221,8 @@ class PiyasaWidget:
             variable=self.var_topmost,
             command=self.toggle_topmost
         )
+        self.settings_menu.add_separator()
+        self.settings_menu.add_command(label="İzlenenleri düzenle", command=self.open_watchlist_settings)
         self.settings_menu.add_command(label="Güncellemeleri kontrol et", command=self.check_updates)
         self.settings_menu.add_separator()
         self.settings_menu.add_command(label="Kapat", command=self.kapat)
@@ -517,14 +1232,14 @@ class PiyasaWidget:
         self.update_thread.start()
         
     def setup_ui(self):
-        # --- Premium V2 Stil Tanımları (Dinamik Fontlar) ---
+        # --- Modern widget stil tanımları (dinamik fontlar) ---
         self.base_fonts = {
             "header": 9,
             "label": 9,
             "value": 11,
-            "portfolio": 20,
-            "profit": 10,
-            "market_status": 14,
+            "portfolio": 24,
+            "profit": 9,
+            "market_status": 13,
             "chart_text": 10,
             "chart_title": 8,
             "chart_tick": 6,
@@ -537,41 +1252,54 @@ class PiyasaWidget:
         self.font_label = tkfont.Font(family="Segoe UI Semibold", size=self.base_fonts["label"])
         self.font_value = tkfont.Font(family="Segoe UI", size=self.base_fonts["value"])
         self.font_portfolio = tkfont.Font(family="Segoe UI", size=self.base_fonts["portfolio"], weight="bold")
-        self.font_profit = tkfont.Font(family="Segoe UI", size=self.base_fonts["profit"])
+        self.font_profit = tkfont.Font(family="Segoe UI Semibold", size=self.base_fonts["profit"])
         
         # Diğer arayüz elemanları için ek fontlar
         self.font_market_status = tkfont.Font(family="Arial", size=self.base_fonts["market_status"])
         self.font_nav_arrow = tkfont.Font(family="Segoe UI", size=9)
         self.font_icon = tkfont.Font(family="Segoe UI Emoji", size=10)
+        self.font_small = tkfont.Font(family="Segoe UI", size=8)
+        self.font_badge = tkfont.Font(family="Segoe UI Semibold", size=8)
         
         # Responsive tasarım için takip
-        self.last_width = 260
+        self.last_width = 320
         self._resize_after_id = None  # Debounce timer
         self.root.bind("<Configure>", self.on_resize)
         
-        # Renk Paleti (Ultra Dark)
-        self.bg_color = "#0f0f0f"
+        # Renk paleti (mockup'taki koyu finans widget hissi)
+        self.bg_color = "#0b0f14"
         self.root.configure(bg=self.bg_color)
         
-        self.color_card = "#141414"
-        self.color_text_main = "#ffffff"
-        self.color_text_dim = "#666666"
-        self.color_accent = "#2196f3"
-        self.color_success = "#2ecc71"
-        self.color_danger = "#e74c3c"
-        self.color_gold = "#d4af37"
+        self.color_card = "#141a21"
+        self.color_card_alt = "#10161d"
+        self.color_border = "#202936"
+        self.color_text_main = "#f8fafc"
+        self.color_text_dim = "#8a94a3"
+        self.color_text_muted = "#5d6675"
+        self.color_accent = "#3b82f6"
+        self.color_success = "#22c55e"
+        self.color_danger = "#ef4444"
+        self.color_gold = "#f4c542"
+        self.color_success_bg = "#10261a"
+        self.color_danger_bg = "#2a1214"
         
         # Ana Konteyner
-        self.frame = tk.Frame(self.root, bg=self.bg_color, padx=15, pady=15)
+        self.frame = tk.Frame(self.root, bg=self.bg_color, padx=12, pady=12)
         self.frame.pack(fill="both", expand=True)
         
-        # 1. ÜST HEADER (Durum Noktası + Navigasyon Okları + Saat)
+        # 1. ÜST HEADER (durum + saat + sayfa navigasyonu)
         header_frame = tk.Frame(self.frame, bg=self.bg_color)
         header_frame.pack(fill="x", pady=(0, 10))
         
-        self.var_market_status = tk.StringVar(value="•") 
-        self.lbl_market_status = tk.Label(header_frame, textvariable=self.var_market_status, bg=self.bg_color, fg=self.color_text_dim, font=self.font_market_status, anchor="w")
-        self.lbl_market_status.pack(side="left")
+        status_frame = tk.Frame(header_frame, bg=self.bg_color)
+        status_frame.pack(side="left", fill="x", expand=True)
+
+        self.var_market_status = tk.StringVar(value="•")
+        self.lbl_market_status = tk.Label(status_frame, textvariable=self.var_market_status, bg=self.bg_color, fg=self.color_text_dim, font=self.font_market_status, anchor="w")
+        self.lbl_market_status.pack(side="left", padx=(0, 5))
+
+        self.var_market_label = tk.StringVar(value="Piyasa bekleniyor")
+        tk.Label(status_frame, textvariable=self.var_market_label, bg=self.bg_color, fg=self.color_text_dim, font=self.font_header, anchor="w").pack(side="left")
         
         # Navigasyon çerçevesi
         nav_frame = tk.Frame(header_frame, bg=self.bg_color)
@@ -592,16 +1320,16 @@ class PiyasaWidget:
         self.btn_next.bind("<Enter>", lambda e: self.btn_next.config(fg="#888888"))
         self.btn_next.bind("<Leave>", lambda e: self._update_arrow_colors())
 
-        # 4. FOOTER (Gizli Butonlar) - footer önce pack edilir (side=bottom)
-        footer_frame = tk.Frame(self.frame, bg=self.bg_color)
+        # 4. FOOTER (kompakt araç çubuğu) - footer önce pack edilir (side=bottom)
+        footer_frame = tk.Frame(self.frame, bg=self.color_card_alt, padx=8, pady=6, highlightthickness=1, highlightbackground=self.color_border)
         footer_frame.pack(side="bottom", fill="x", pady=(10, 0))
         
         def create_icon_btn(parent, text, command):
-            lbl = tk.Label(parent, text=text, bg=self.bg_color, fg="#333333", font=self.font_icon, cursor="hand2")
-            lbl.pack(side="right", padx=(10, 0))
+            lbl = tk.Label(parent, text=text, bg=self.color_card_alt, fg=self.color_text_muted, font=self.font_icon, cursor="hand2", width=2)
+            lbl.pack(side="right", padx=(8, 0))
             lbl.bind("<Button-1>", lambda e: command())
-            lbl.bind("<Enter>", lambda e: lbl.config(fg="#888888"))
-            lbl.bind("<Leave>", lambda e: lbl.config(fg="#333333"))
+            lbl.bind("<Enter>", lambda e: lbl.config(fg=self.color_text_main))
+            lbl.bind("<Leave>", lambda e: lbl.config(fg=self.color_text_muted))
             return lbl
 
         create_icon_btn(footer_frame, "⚙️", self.open_settings)
@@ -616,21 +1344,28 @@ class PiyasaWidget:
         # --- Sayfa 0: Ana Sayfa ---
         self.page_main = tk.Frame(self.content_container, bg=self.bg_color)
         
-        portfolio_frame = tk.Frame(self.page_main, bg=self.bg_color)
-        portfolio_frame.pack(fill="x", pady=(0, 20))
+        portfolio_frame = tk.Frame(self.page_main, bg=self.color_card, padx=12, pady=12, highlightthickness=1, highlightbackground=self.color_border)
+        portfolio_frame.pack(fill="x", pady=(0, 12))
         
-        tk.Label(portfolio_frame, text="TOPLAM VARLIK", bg=self.bg_color, fg=self.color_text_dim, font=self.font_header, anchor="w").pack(fill="x")
+        tk.Label(portfolio_frame, text="TOPLAM VARLIK", bg=self.color_card, fg=self.color_text_dim, font=self.font_header, anchor="w").pack(fill="x")
         
         self.var_portfolio = tk.StringVar(value="₺...")
-        tk.Label(portfolio_frame, textvariable=self.var_portfolio, bg=self.bg_color, fg=self.color_text_main, font=self.font_portfolio, anchor="w").pack(fill="x")
+        tk.Label(portfolio_frame, textvariable=self.var_portfolio, bg=self.color_card, fg=self.color_text_main, font=self.font_portfolio, anchor="w").pack(fill="x", pady=(2, 4))
         
         self.var_profit = tk.StringVar(value="...")
-        self.lbl_profit = tk.Label(portfolio_frame, textvariable=self.var_profit, bg=self.bg_color, fg=self.color_text_dim, font=self.font_profit, anchor="w")
-        self.lbl_profit.pack(fill="x")
+        self.lbl_profit = tk.Label(portfolio_frame, textvariable=self.var_profit, bg=self.color_card_alt, fg=self.color_text_dim, font=self.font_profit, anchor="w", padx=7, pady=2)
+        self.lbl_profit.pack(anchor="w")
 
-        self.create_price_row("Gümüş ONS", "$...", "var_gumus_ons", self.color_text_main, self.page_main)
-        self.create_price_row("Gümüş TL", "₺...", "var_gumus_tl", self.color_text_main, self.page_main)
-        self.create_price_row("Altın TL", "₺...", "var_altin_tl", self.color_gold, self.page_main)
+        self.portfolio_breakdown_frame = tk.Frame(portfolio_frame, bg=self.color_card)
+        self.portfolio_breakdown_frame.pack(fill="x", pady=(10, 0))
+
+        self.price_rows_frame = tk.Frame(self.page_main, bg=self.bg_color)
+        self.price_rows_frame.pack(fill="x")
+        self.price_vars = {}
+        self.price_change_vars = {}
+        self.price_change_labels = {}
+        self.price_spark_canvases = {}
+        self.rebuild_price_rows()
 
         # --- Sayfa 1: Grafik Sayfası ---
         self.page_chart = tk.Frame(self.content_container, bg=self.bg_color)
@@ -653,17 +1388,197 @@ class PiyasaWidget:
         self.grip.bind("<Enter>", lambda e: self.grip.config(fg="#666666"))
         self.grip.bind("<Leave>", lambda e: self.grip.config(fg="#333333"))
 
-    def create_price_row(self, label_text, initial_value, var_name, color, parent=None):
+    def create_price_row(self, instrument, parent=None):
         if parent is None:
             parent = self.frame
-        row = tk.Frame(parent, bg=self.bg_color)
-        row.pack(fill="x", pady=4)
+        row = tk.Frame(parent, bg=self.color_card_alt, padx=9, pady=7, highlightthickness=1, highlightbackground=self.color_border)
+        row.pack(fill="x", pady=3)
+        row.grid_columnconfigure(1, weight=1)
+
+        tk.Label(row, text=instrument["label"], bg=self.color_card_alt, fg=self.color_text_dim, font=self.font_label, anchor="w").grid(row=0, column=0, sticky="w", padx=(0, 8))
+
+        spark = tk.Canvas(row, width=64, height=20, bg=self.color_card_alt, highlightthickness=0)
+        spark.grid(row=0, column=1, sticky="ew", padx=(0, 8))
         
-        tk.Label(row, text=label_text, bg=self.bg_color, fg=self.color_text_dim, font=self.font_label, anchor="w").pack(side="left")
-        
-        var = tk.StringVar(value=initial_value)
-        setattr(self, var_name, var)
-        tk.Label(row, textvariable=var, bg=self.bg_color, fg=color, font=self.font_value, anchor="e").pack(side="right")
+        placeholder = f"{instrument.get('currency', '')}..."
+        var = tk.StringVar(value=placeholder)
+        self.price_vars[instrument["key"]] = var
+        if instrument["key"] == "gumus_ons":
+            self.var_gumus_ons = var
+        elif instrument["key"] == "gumus_tl":
+            self.var_gumus_tl = var
+        elif instrument["key"] == "altin_tl":
+            self.var_altin_tl = var
+        tk.Label(row, textvariable=var, bg=self.color_card_alt, fg=instrument.get("color", self.color_text_main), font=self.font_value, anchor="e").grid(row=0, column=2, sticky="e", padx=(0, 7))
+
+        change_var = tk.StringVar(value="--")
+        self.price_change_vars[instrument["key"]] = change_var
+        badge = tk.Label(row, textvariable=change_var, bg="#1b2430", fg=self.color_text_muted, font=self.font_badge, padx=6, pady=1)
+        badge.grid(row=0, column=3, sticky="e")
+        self.price_change_labels[instrument["key"]] = badge
+        self.price_spark_canvases[instrument["key"]] = spark
+
+    def rebuild_price_rows(self):
+        if not hasattr(self, "price_rows_frame"):
+            return
+        for child in self.price_rows_frame.winfo_children():
+            child.destroy()
+        self.price_vars = {}
+        self.price_change_vars = {}
+        self.price_change_labels = {}
+        self.price_spark_canvases = {}
+        for instrument in self.watchlist:
+            self.create_price_row(instrument, self.price_rows_frame)
+
+    def _format_change(self, change_pct):
+        if change_pct is None:
+            return "--"
+        sign = "+" if change_pct >= 0 else ""
+        return f"{sign}{change_pct:.1f}%"
+
+    def _get_change_pct(self, key, current_value):
+        try:
+            first, last = self.history_db.get_first_last(key, days=7)
+        except Exception:
+            return None
+        first_value = None
+        if first:
+            try:
+                first_value = float(first[0])
+            except (TypeError, ValueError):
+                first_value = None
+        if not first_value:
+            return None
+        try:
+            current_value = float(current_value)
+        except (TypeError, ValueError):
+            if last:
+                try:
+                    current_value = float(last[0])
+                except (TypeError, ValueError):
+                    return None
+            else:
+                return None
+        if first_value == 0:
+            return None
+        return ((current_value - first_value) / first_value) * 100
+
+    def _get_sparkline_values(self, key, current_value):
+        values = []
+        try:
+            data = self.history_db.get_history(key, days=7)
+        except Exception:
+            data = []
+        if isinstance(data, (list, tuple)):
+            for row in data[-28:]:
+                try:
+                    values.append(float(row[1]))
+                except (TypeError, ValueError, IndexError):
+                    pass
+        try:
+            current_value = float(current_value)
+        except (TypeError, ValueError):
+            current_value = None
+        if current_value and (not values or values[-1] != current_value):
+            values.append(current_value)
+        return [v for v in values if v > 0]
+
+    def _draw_sparkline(self, canvas, values, color):
+        if not canvas:
+            return
+        try:
+            canvas.delete("all")
+            width = canvas.winfo_width() or 64
+            height = canvas.winfo_height() or 20
+            if len(values) < 2:
+                y = height // 2
+                canvas.create_line(0, y, width, y, fill=self.color_border, width=1)
+                return
+            min_v = min(values)
+            max_v = max(values)
+            value_range = max_v - min_v if max_v != min_v else 1
+            points = []
+            for i, value in enumerate(values):
+                x = int((width - 2) * i / max(len(values) - 1, 1)) + 1
+                y = int((height - 4) * (1 - (value - min_v) / value_range)) + 2
+                points.append((x, y))
+            flat = [coord for point in points for coord in point]
+            canvas.create_line(flat, fill=color, width=1.6, smooth=True)
+            last_x, last_y = points[-1]
+            canvas.create_oval(last_x - 2, last_y - 2, last_x + 2, last_y + 2, fill=color, outline="")
+        except Exception:
+            pass
+
+    def _update_price_row_visuals(self, prices):
+        if not hasattr(self, "price_change_vars"):
+            return
+        for instrument in self.watchlist:
+            key = instrument["key"]
+            value = prices.get(key)
+            change_pct = self._get_change_pct(key, value)
+            change_var = self.price_change_vars.get(key)
+            badge = self.price_change_labels.get(key)
+            if change_var:
+                change_var.set(self._format_change(change_pct))
+            if badge:
+                if change_pct is None:
+                    badge.config(bg="#1b2430", fg=self.color_text_muted)
+                elif change_pct >= 0:
+                    badge.config(bg=self.color_success_bg, fg=self.color_success)
+                else:
+                    badge.config(bg=self.color_danger_bg, fg=self.color_danger)
+            values = self._get_sparkline_values(key, value)
+            self._draw_sparkline(self.price_spark_canvases.get(key), values, instrument.get("color", self.color_accent))
+
+    def _format_tl(self, value, decimals=0):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return "₺0"
+        return f"₺{value:,.{decimals}f}"
+
+    def rebuild_portfolio_breakdown(self, summary):
+        if not hasattr(self, "portfolio_breakdown_frame"):
+            return
+        for child in self.portfolio_breakdown_frame.winfo_children():
+            child.destroy()
+
+        rows = summary.get("rows", []) if summary else []
+        if not rows:
+            tk.Label(
+                self.portfolio_breakdown_frame,
+                text="Portföy boş",
+                bg=self.color_card,
+                fg=self.color_text_muted,
+                font=self.font_small,
+                anchor="w",
+            ).pack(fill="x")
+            return
+
+        for row_data in rows:
+            row = tk.Frame(self.portfolio_breakdown_frame, bg=self.color_card)
+            row.pack(fill="x", pady=2)
+            row.grid_columnconfigure(1, weight=1)
+
+            qty = f"{row_data['quantity']:,.2f}".rstrip("0").rstrip(".")
+            left = f"{row_data['label']}: {qty} {row_data['unit']}"
+            tk.Label(row, text=left, bg=self.color_card, fg=self.color_text_dim, font=self.font_small, anchor="w").grid(row=0, column=0, sticky="w")
+
+            if row_data["has_price"]:
+                value_text = self._format_tl(row_data["value_tl"], 0)
+            else:
+                value_text = "Fiyat yok"
+            tk.Label(row, text=value_text, bg=self.color_card, fg=self.color_text_main, font=self.font_small, anchor="e").grid(row=0, column=1, sticky="e", padx=(8, 8))
+
+            profit = row_data.get("profit_tl")
+            if profit is None:
+                profit_text = "--"
+                profit_color = self.color_text_muted
+            else:
+                sign = "+" if profit >= 0 else ""
+                profit_text = f"{sign}{self._format_tl(abs(profit), 0)}" if profit >= 0 else f"-{self._format_tl(abs(profit), 0)}"
+                profit_color = self.color_success if profit >= 0 else self.color_danger
+            tk.Label(row, text=profit_text, bg=self.color_card, fg=profit_color, font=self.font_badge, anchor="e").grid(row=0, column=2, sticky="e")
 
     # --- Sayfa Navigasyon Sistemi ---
     def show_page(self, index):
@@ -693,36 +1608,53 @@ class PiyasaWidget:
     # --- Grafik Sayfası ---
     def _build_chart_page(self):
         # Veri seçici butonlar
-        selector_frame = tk.Frame(self.page_chart, bg=self.bg_color)
-        selector_frame.pack(fill="x", pady=(0, 2))
+        selector_frame = tk.Frame(self.page_chart, bg=self.color_card_alt, padx=6, pady=6, highlightthickness=1, highlightbackground=self.color_border)
+        selector_frame.pack(fill="x", pady=(0, 8))
         
-        self.chart_var = tk.StringVar(value="gumus_tl")
+        default_key = "gumus_tl" if any(item["key"] == "gumus_tl" for item in self.watchlist) else self.watchlist[0]["key"]
+        self.chart_var = tk.StringVar(value=default_key)
         self.chart_period = tk.IntVar(value=7)
-        
-        btn_style = {"bg": "#1a1a1a", "fg": "#888888", "font": ("Segoe UI", 7), 
-                     "relief": "flat", "bd": 0, "cursor": "hand2", 
-                     "activebackground": "#252525", "activeforeground": "#ffffff"}
-        
-        for text, val in [("Gümüş", "gumus_tl"), ("Altın", "altin_tl"), ("Dolar", "dolar")]:
-            rb = tk.Radiobutton(selector_frame, text=text, variable=self.chart_var, value=val,
-                               bg=self.bg_color, fg="#cccccc", selectcolor="#252525",
-                               activebackground=self.bg_color, activeforeground="#ffffff",
-                               font=("Segoe UI", 8), indicatoron=0, padx=6, pady=1,
-                               command=self._update_chart)
-            rb.pack(side="left", padx=1)
+
+        self.chart_symbol_frame = tk.Frame(selector_frame, bg=self.color_card_alt)
+        self.chart_symbol_frame.pack(side="left", fill="x", expand=True)
+        self._rebuild_chart_symbol_buttons()
         
         # Periyot seçici
+        period_frame = tk.Frame(selector_frame, bg=self.color_card_alt)
+        period_frame.pack(side="right")
         for text, val in [("7G", 7), ("30G", 30), ("Tümü", 0)]:
-            rb = tk.Radiobutton(selector_frame, text=text, variable=self.chart_period, value=val,
-                               bg=self.bg_color, fg="#cccccc", selectcolor="#252525",
-                               activebackground=self.bg_color, activeforeground="#ffffff",
+            rb = tk.Radiobutton(period_frame, text=text, variable=self.chart_period, value=val,
+                               bg=self.color_card_alt, fg=self.color_text_dim, selectcolor=self.color_card,
+                               activebackground=self.color_card_alt, activeforeground=self.color_text_main,
                                font=("Segoe UI", 8), indicatoron=0, padx=4, pady=1,
                                command=self._update_chart)
             rb.pack(side="right", padx=1)
         
         # tkinter Canvas grafik
-        self.chart_canvas = tk.Canvas(self.page_chart, bg=self.bg_color, highlightthickness=0)
+        self.chart_canvas = tk.Canvas(self.page_chart, bg=self.color_card, highlightthickness=1, highlightbackground=self.color_border)
         self.chart_canvas.pack(fill="both", expand=True)
+
+    def _instrument_by_key(self, key):
+        for instrument in self.watchlist:
+            if instrument["key"] == key:
+                return instrument
+        return self.watchlist[0] if self.watchlist else None
+
+    def _rebuild_chart_symbol_buttons(self):
+        if not hasattr(self, "chart_symbol_frame"):
+            return
+        for child in self.chart_symbol_frame.winfo_children():
+            child.destroy()
+        valid_keys = {item["key"] for item in self.watchlist}
+        if self.chart_var.get() not in valid_keys and self.watchlist:
+            self.chart_var.set(self.watchlist[0]["key"])
+        for instrument in self.watchlist:
+            rb = tk.Radiobutton(self.chart_symbol_frame, text=instrument["label"], variable=self.chart_var, value=instrument["key"],
+                               bg=self.color_card_alt, fg=self.color_text_dim, selectcolor=self.color_card,
+                               activebackground=self.color_card_alt, activeforeground=self.color_text_main,
+                               font=("Segoe UI", 8), indicatoron=0, padx=6, pady=1,
+                               command=self._update_chart)
+            rb.pack(side="left", padx=1)
 
     @staticmethod
     def _filter_outliers(values, timestamps):
@@ -787,22 +1719,24 @@ class PiyasaWidget:
             f_no_data = int(10 * scale)
             
             days = self.chart_period.get()
+            selected = self.chart_var.get()
             if days == 0:
-                data = self.history_db.get_all_history()
+                data = self.history_db.get_all_history(selected)
             else:
-                data = self.history_db.get_history(days=days)
+                data = self.history_db.get_history(selected, days=days)
             
             if not data:
                 self.chart_canvas.create_text(cw//2, ch//2, text="Veri yok", fill="#aaaaaa", font=("Segoe UI", f_no_data))
                 return
             
-            selected = self.chart_var.get()
-            col_map = {"gumus_tl": (2, "Gümüş TL/g", self.color_accent),
-                       "altin_tl": (3, "Altın TL/g", self.color_gold),
-                       "dolar": (4, "Dolar", self.color_success)}
-            col_idx, title, color = col_map[selected]
+            instrument = self._instrument_by_key(selected)
+            if not instrument:
+                self.chart_canvas.create_text(cw//2, ch//2, text="Veri yok", fill="#aaaaaa", font=("Segoe UI", f_no_data))
+                return
+            title = instrument["label"]
+            color = instrument.get("color", self.color_accent)
             
-            raw_values = [row[col_idx] for row in data]
+            raw_values = [row[1] for row in data]
             raw_timestamps = [row[0] for row in data]
             
             # Outlier filtreleme (bozuk/saçma verileri temizle)
@@ -881,32 +1815,27 @@ class PiyasaWidget:
             # Son değer etiketi
             last_x, last_y = points[-1]
             last_v = values[-1]
-            if last_v >= 10000:
-                fmt_v = f"{last_v:,.0f}"
-            elif last_v >= 100:
-                fmt_v = f"{last_v:.1f}"
-            else:
-                fmt_v = f"{last_v:.2f}"
+            fmt_v = format_instrument_value(instrument, last_v)
             self.chart_canvas.create_oval(last_x-3, last_y-3, last_x+3, last_y+3, fill=color, outline="")
             # Etiketi grafik sınırları içinde tut
             label_y = max(last_y - 12, pad_t + 5)
             self.chart_canvas.create_text(last_x, label_y, text=fmt_v, fill=color, font=("Segoe UI", f_val, "bold"))
             
         except Exception as e:
-            print(f"Chart error: {e}")
+            log_message(f"Chart error: {e}")
 
     # --- İstatistik Sayfası ---
     def _build_stats_page(self):
         # Periyot seçici
-        period_frame = tk.Frame(self.page_stats, bg=self.bg_color)
+        period_frame = tk.Frame(self.page_stats, bg=self.color_card_alt, padx=6, pady=6, highlightthickness=1, highlightbackground=self.color_border)
         period_frame.pack(fill="x", pady=(0, 8))
         
         self.stats_period = tk.IntVar(value=7)
         
         for text, val in [("7 Gün", 7), ("30 Gün", 30), ("Tümü", 0)]:
             rb = tk.Radiobutton(period_frame, text=text, variable=self.stats_period, value=val,
-                               bg=self.bg_color, fg="#cccccc", selectcolor="#252525",
-                               activebackground=self.bg_color, activeforeground="#ffffff",
+                               bg=self.color_card_alt, fg=self.color_text_dim, selectcolor=self.color_card,
+                               activebackground=self.color_card_alt, activeforeground=self.color_text_main,
                                font=("Segoe UI", 8), indicatoron=0, padx=6, pady=2,
                                command=self._update_stats)
             rb.pack(side="left", padx=2)
@@ -916,72 +1845,81 @@ class PiyasaWidget:
         self.stats_frame.pack(fill="both", expand=True)
         
         self.stats_labels = {}
-        for key, name, color in [("gumus", "Gümüş TL/g", self.color_accent), 
-                                  ("altin", "Altın TL/g", self.color_gold),
-                                  ("dolar", "Dolar", self.color_success)]:
-            section = tk.Frame(self.stats_frame, bg=self.bg_color)
-            section.pack(fill="x", pady=4)
+        self._rebuild_stats_sections()
+
+    def _rebuild_stats_sections(self):
+        if not hasattr(self, "stats_frame"):
+            return
+        for child in self.stats_frame.winfo_children():
+            child.destroy()
+
+        self.stats_labels = {}
+        for instrument in self.watchlist:
+            key = instrument["key"]
+            section = tk.Frame(self.stats_frame, bg=self.color_card_alt, padx=9, pady=7, highlightthickness=1, highlightbackground=self.color_border)
+            section.pack(fill="x", pady=3)
             
-            tk.Label(section, text=name, bg=self.bg_color, fg=color, font=("Segoe UI Semibold", 8)).pack(anchor="w")
+            tk.Label(section, text=instrument["label"], bg=self.color_card_alt, fg=instrument.get("color", self.color_accent), font=("Segoe UI Semibold", 8)).pack(anchor="w")
             
-            row = tk.Frame(section, bg=self.bg_color)
+            row = tk.Frame(section, bg=self.color_card_alt)
             row.pack(fill="x")
             
-            self.stats_labels[f"{key}_min"] = tk.Label(row, text="Min: --", bg=self.bg_color, fg="#aaaaaa", font=("Segoe UI", 8))
-            self.stats_labels[f"{key}_min"].pack(side="left", expand=True)
+            self.stats_labels[key] = {}
+            self.stats_labels[key]["min"] = tk.Label(row, text="Min: --", bg=self.color_card_alt, fg=self.color_text_dim, font=("Segoe UI", 8))
+            self.stats_labels[key]["min"].pack(side="left", expand=True)
             
-            self.stats_labels[f"{key}_max"] = tk.Label(row, text="Max: --", bg=self.bg_color, fg="#aaaaaa", font=("Segoe UI", 8))
-            self.stats_labels[f"{key}_max"].pack(side="left", expand=True)
+            self.stats_labels[key]["max"] = tk.Label(row, text="Max: --", bg=self.color_card_alt, fg=self.color_text_dim, font=("Segoe UI", 8))
+            self.stats_labels[key]["max"].pack(side="left", expand=True)
             
-            row2 = tk.Frame(section, bg=self.bg_color)
+            row2 = tk.Frame(section, bg=self.color_card_alt)
             row2.pack(fill="x")
             
-            self.stats_labels[f"{key}_avg"] = tk.Label(row2, text="Ort: --", bg=self.bg_color, fg="#aaaaaa", font=("Segoe UI", 8))
-            self.stats_labels[f"{key}_avg"].pack(side="left", expand=True)
+            self.stats_labels[key]["avg"] = tk.Label(row2, text="Ort: --", bg=self.color_card_alt, fg=self.color_text_dim, font=("Segoe UI", 8))
+            self.stats_labels[key]["avg"].pack(side="left", expand=True)
             
-            self.stats_labels[f"{key}_chg"] = tk.Label(row2, text="Δ: --", bg=self.bg_color, fg="#aaaaaa", font=("Segoe UI", 8))
-            self.stats_labels[f"{key}_chg"].pack(side="left", expand=True)
+            self.stats_labels[key]["chg"] = tk.Label(row2, text="Δ: --", bg=self.color_card_alt, fg=self.color_text_dim, font=("Segoe UI", 8))
+            self.stats_labels[key]["chg"].pack(side="left", expand=True)
 
     def _update_stats(self):
         try:
             days = self.stats_period.get()
             days_param = days if days > 0 else None
-            
-            stats = self.history_db.get_stats(days=days_param)
-            first_last = self.history_db.get_first_last(days=days_param)
-            
-            if not stats or stats[9] == 0:  # count == 0
-                for key in self.stats_labels:
-                    self.stats_labels[key].config(text="Veri yok")
-                return
-            
-            # gumus: indices 0,1,2  altin: 3,4,5  dolar: 6,7,8
-            items = [("gumus", 0, "₺"), ("altin", 3, "₺"), ("dolar", 6, "")]
-            for key, offset, prefix in items:
-                mn, mx, avg = stats[offset], stats[offset+1], stats[offset+2]
-                
-                if key == "altin":
-                    self.stats_labels[f"{key}_min"].config(text=f"Min: {prefix}{mn:,.0f}")
-                    self.stats_labels[f"{key}_max"].config(text=f"Max: {prefix}{mx:,.0f}")
-                    self.stats_labels[f"{key}_avg"].config(text=f"Ort: {prefix}{avg:,.0f}")
-                else:
-                    self.stats_labels[f"{key}_min"].config(text=f"Min: {prefix}{mn:.2f}")
-                    self.stats_labels[f"{key}_max"].config(text=f"Max: {prefix}{mx:.2f}")
-                    self.stats_labels[f"{key}_avg"].config(text=f"Ort: {prefix}{avg:.2f}")
-                
+
+            for instrument in self.watchlist:
+                key = instrument["key"]
+                labels = self.stats_labels.get(key)
+                if not labels:
+                    continue
+
+                stats = self.history_db.get_stats(key, days=days_param)
+                first_last = self.history_db.get_first_last(key, days=days_param)
+
+                if not stats or stats[3] == 0:
+                    labels["min"].config(text="Min: --")
+                    labels["max"].config(text="Max: --")
+                    labels["avg"].config(text="Ort: --")
+                    labels["chg"].config(text="Δ: --", fg="#aaaaaa")
+                    continue
+
+                mn, mx, avg = stats[0], stats[1], stats[2]
+                labels["min"].config(text=f"Min: {format_instrument_value(instrument, mn)}")
+                labels["max"].config(text=f"Max: {format_instrument_value(instrument, mx)}")
+                labels["avg"].config(text=f"Ort: {format_instrument_value(instrument, avg)}")
+
                 # Değişim %
                 first, last = first_last
                 if first and last:
-                    fi = {"gumus": 0, "altin": 1, "dolar": 2}[key]
-                    if first[fi] and first[fi] != 0:
-                        chg = ((last[fi] - first[fi]) / first[fi]) * 100
+                    first_value = first[0]
+                    last_value = last[0]
+                    if first_value and first_value != 0:
+                        chg = ((last_value - first_value) / first_value) * 100
                         sign = "+" if chg >= 0 else ""
                         color = self.color_success if chg >= 0 else self.color_danger
-                        self.stats_labels[f"{key}_chg"].config(text=f"Δ: {sign}{chg:.1f}%", fg=color)
+                        labels["chg"].config(text=f"Δ: {sign}{chg:.1f}%", fg=color)
                     else:
-                        self.stats_labels[f"{key}_chg"].config(text="Δ: --")
+                        labels["chg"].config(text="Δ: --", fg="#aaaaaa")
         except Exception as e:
-            print(f"Stats error: {e}")
+            log_message(f"Stats error: {e}")
 
     def toggle_autostart(self):
         self.asm.set_autostart(self.var_autostart.get())
@@ -1025,21 +1963,110 @@ class PiyasaWidget:
 
     def save_last_data(self, data):
         try:
-            filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "market_data.json")
+            normalized = normalize_market_data(data)
+            if not normalized:
+                return
+            filepath = getattr(self, "market_data_path", app_path("market_data.json"))
             with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=4)
+                json.dump(market_data_for_save(normalized["prices"], normalized.get("timestamp")), f, indent=4, ensure_ascii=False)
         except Exception as e:
-            print(f"Veri kaydetme hatası: {e}")
+            log_message(f"Veri kaydetme hatası: {e}")
 
     def load_last_data(self):
         try:
-            filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), "market_data.json")
+            filepath = getattr(self, "market_data_path", app_path("market_data.json"))
             if os.path.exists(filepath):
                 with open(filepath, 'r', encoding='utf-8') as f:
-                    return json.load(f)
+                    return normalize_market_data(json.load(f))
         except Exception as e:
-            print(f"Veri okuma hatası: {e}")
+            log_message(f"Veri okuma hatası: {e}")
         return None
+
+    @staticmethod
+    def _extract_price(ticker):
+        try:
+            fast_info = getattr(ticker, "fast_info", None)
+            if fast_info:
+                for key in (
+                    "last_price", "lastPrice",
+                    "regular_market_price", "regularMarketPrice",
+                    "previous_close", "previousClose",
+                    "regular_market_previous_close", "regularMarketPreviousClose",
+                    "bid",
+                ):
+                    try:
+                        val = fast_info.get(key) if hasattr(fast_info, "get") else getattr(fast_info, key, None)
+                        if val and val > 0:
+                            return float(val)
+                    except:
+                        pass
+        except:
+            pass
+
+        try:
+            info = ticker.info
+            val = info.get("regularMarketPrice") or info.get("previousClose") or info.get("bid") or 0
+            return float(val) if val and val > 0 else 0
+        except:
+            return 0
+
+    def _required_yahoo_symbols(self):
+        symbols = set()
+        for instrument in self.watchlist:
+            symbols.add(instrument["symbol"])
+            if instrument.get("source") == "metal_try" or instrument.get("currency") == "$":
+                symbols.add("TRY=X")
+        return sorted(symbols)
+
+    def _fetch_raw_prices(self, symbols):
+        if not symbols:
+            return {}
+        tickers = yf.Tickers(" ".join(symbols))
+        ticker_map = getattr(tickers, "tickers", {})
+        prices = {}
+        for symbol in symbols:
+            ticker = None
+            try:
+                ticker = ticker_map.get(symbol) if hasattr(ticker_map, "get") else ticker_map[symbol]
+            except:
+                ticker = None
+            if ticker is None:
+                continue
+            price = self._extract_price(ticker)
+            if price and price > 0:
+                prices[symbol] = price
+        return prices
+
+    def validate_yahoo_symbol(self, symbol):
+        symbol = symbol.strip().upper()
+        prices = self._fetch_raw_prices([symbol])
+        return prices.get(symbol, 0)
+
+    def _resolve_watchlist_prices(self, raw_prices, last_prices=None):
+        last_prices = last_prices or {}
+        prices = {}
+        fresh_keys = set()
+        dolar = raw_prices.get("TRY=X")
+
+        for instrument in self.watchlist:
+            key = instrument["key"]
+            symbol = instrument["symbol"]
+            value = 0
+
+            if instrument.get("source") == "metal_try":
+                base_price = raw_prices.get(symbol)
+                if base_price and dolar:
+                    value = (base_price * dolar) / TROY_OUNCE_GRAMS
+            else:
+                value = raw_prices.get(symbol, 0)
+
+            if value and value > 0:
+                prices[key] = float(value)
+                fresh_keys.add(key)
+            elif key in last_prices:
+                prices[key] = last_prices[key]
+
+        return prices, fresh_keys
 
     def request_data_refresh(self):
         threading.Thread(target=self.veri_getir, daemon=True).start()
@@ -1053,22 +2080,20 @@ class PiyasaWidget:
                 def set_closed_ui():
                     self.var_market_status.set("•")
                     self.lbl_market_status.config(fg=self.color_danger) # Kırmızı nokta
+                    if hasattr(self, "var_market_label"):
+                        self.var_market_label.set("Piyasa Kapalı")
                     
                     # Kayıtlı son veriyi yükle
                     last_data = self.load_last_data()
                     if last_data:
-                        self.guncelle_arayuz(
-                            last_data.get("ons_gumus", 0),
-                            last_data.get("gram_gumus_tl", 0),
-                            last_data.get("gram_altin_tl", 0)
-                        )
+                        self.guncelle_arayuz(last_data)
                         # Dolar kurunu da güncelle, portföy hesaplamaları için gerekebilir
                         self.last_dolar_rate = last_data.get("dolar", 36.0)
                         
                         last_time = last_data.get("timestamp", "")
-                        self.var_time.set(f"Piyasa Kapalı (Son: {last_time})")
+                        self.var_time.set(f"Son: {last_time}" if last_time else "Kapalı")
                     else:
-                        self.var_time.set(f"Uyku ({time.strftime('%H:%M')})")
+                        self.var_time.set(time.strftime("%H:%M"))
                 
                 self.root.after(0, set_closed_ui)
                 return # API isteği atma
@@ -1076,94 +2101,103 @@ class PiyasaWidget:
             def set_open_ui():
                 self.var_market_status.set("•")
                 self.lbl_market_status.config(fg=self.color_success) # Yeşil nokta
+                if hasattr(self, "var_market_label"):
+                    self.var_market_label.set("Piyasa Açık")
             
             self.root.after(0, set_open_ui)
 
-            # XAGUSD=X hata verdiği için SI=F (Vadeli) geri dönüyoruz.
-            tickers = yf.Tickers("SI=F GC=F TRY=X")
-            
-            # Veri çekme
-            def get_price(symbol):
-                ticker = tickers.tickers[symbol]
-                try:
-                    fast_info = getattr(ticker, "fast_info", None)
-                    if fast_info:
-                        for key in (
-                            "last_price", "lastPrice",
-                            "regular_market_price", "regularMarketPrice",
-                            "previous_close", "previousClose",
-                            "regular_market_previous_close", "regularMarketPreviousClose",
-                            "bid",
-                        ):
-                            try:
-                                val = fast_info.get(key) if hasattr(fast_info, "get") else getattr(fast_info, key, None)
-                                if val and val > 0:
-                                    return float(val)
-                            except:
-                                pass
-                except:
-                    pass
+            last_data = self.load_last_data()
+            last_prices = last_data.get("prices", {}) if last_data else {}
 
-                try:
-                    info = ticker.info
-                    val = info.get("regularMarketPrice") or info.get("previousClose") or info.get("bid") or 0
-                    return val
-                except:
-                    return 0
+            raw_prices = self._fetch_raw_prices(self._required_yahoo_symbols())
+            if raw_prices.get("TRY=X"):
+                self.last_dolar_rate = raw_prices["TRY=X"]
+            prices, fresh_keys = self._resolve_watchlist_prices(raw_prices, last_prices)
 
-            ons_gumus = get_price("SI=F")
-            ons_altin = get_price("GC=F")
-            dolar = get_price("TRY=X")
-            self.last_dolar_rate = dolar
-            
-            # Hesaplamalar
-            gram_gumus_tl = (ons_gumus * dolar) / 31.1035
-            gram_altin_tl = (ons_altin * dolar) / 31.1035
-            
-            # Geçerlilik kontrolü: tüm değerler pozitif olmalı
-            if all(v and v > 0 for v in [ons_gumus, gram_gumus_tl, gram_altin_tl, dolar]):
-                # Verileri kaydet
-                market_data = {
-                    "ons_gumus": ons_gumus,
-                    "gram_gumus_tl": gram_gumus_tl,
-                    "gram_altin_tl": gram_altin_tl,
-                    "dolar": dolar,
-                    "timestamp": time.strftime("%d.%m %H:%M")
-                }
+            if fresh_keys:
+                market_data = market_data_for_save(prices)
                 self.save_last_data(market_data)
-                self.history_db.insert(ons_gumus, gram_gumus_tl, gram_altin_tl, dolar)
+                fresh_prices = {key: prices[key] for key in fresh_keys}
+                self.history_db.insert_prices(fresh_prices, self.watchlist)
                 
                 # UI Güncelleme (Main Thread'e güvenli geçiş için)
-                self.root.after(0, lambda: self.guncelle_arayuz(ons_gumus, gram_gumus_tl, gram_altin_tl))
+                self.root.after(0, lambda data=market_data: self.guncelle_arayuz(data))
+            elif last_data:
+                def set_cached_ui():
+                    self.guncelle_arayuz(last_data)
+                    last_time = last_data.get("timestamp", "")
+                    if hasattr(self, "var_market_label"):
+                        self.var_market_label.set("Bağlantı Hatası")
+                    self.lbl_market_status.config(fg=self.color_danger)
+                    self.var_time.set(f"Son: {last_time}" if last_time else "Hata")
+                self.root.after(0, set_cached_ui)
             else:
-                # Geçersiz veri — son bilinen veriyi göster, kaydetme
-                print(f"Geçersiz veri atlandı: ons={ons_gumus}, dolar={dolar}")
-                last_data = self.load_last_data()
-                if last_data:
-                    self.root.after(0, lambda: self.guncelle_arayuz(
-                        last_data.get("ons_gumus", 0),
-                        last_data.get("gram_gumus_tl", 0),
-                        last_data.get("gram_altin_tl", 0)
-                    ))
+                def set_error_ui():
+                    if hasattr(self, "var_market_label"):
+                        self.var_market_label.set("Bağlantı Hatası")
+                    self.lbl_market_status.config(fg=self.color_danger)
+                    self.var_time.set("Hata")
+                self.root.after(0, set_error_ui)
             
         except Exception as e:
-            self.root.after(0, lambda: self.var_time.set("Bağlantı Hatası"))
+            last_data = self.load_last_data()
+            if last_data:
+                def set_error_cached_ui():
+                    self.guncelle_arayuz(last_data)
+                    if hasattr(self, "var_market_label"):
+                        self.var_market_label.set("Bağlantı Hatası")
+                    self.lbl_market_status.config(fg=self.color_danger)
+                    last_time = last_data.get("timestamp", "")
+                    self.var_time.set(f"Son: {last_time}" if last_time else "Hata")
+                self.root.after(0, set_error_cached_ui)
+            else:
+                def set_error_ui():
+                    if hasattr(self, "var_market_label"):
+                        self.var_market_label.set("Bağlantı Hatası")
+                    self.lbl_market_status.config(fg=self.color_danger)
+                    self.var_time.set("Hata")
+                self.root.after(0, set_error_ui)
         finally:
             self._fetch_lock.release()
 
-    def guncelle_arayuz(self, ons_g, gram_g, gram_a):
-        self.var_gumus_ons.set(f"${ons_g:.2f}")
-        self.var_gumus_tl.set(f"₺{gram_g:.2f}")
-        self.var_altin_tl.set(f"₺{gram_a:.0f}")
-        current_time = time.strftime("%H:%M:%S")
-        self.var_time.set(f"Son Güncelleme: {current_time}")
+    def guncelle_arayuz(self, data_or_ons=None, gram_g=None, gram_a=None):
+        if isinstance(data_or_ons, dict):
+            data = normalize_market_data(data_or_ons)
+        else:
+            prices = {}
+            if data_or_ons is not None:
+                prices["gumus_ons"] = data_or_ons
+            if gram_g is not None:
+                prices["gumus_tl"] = gram_g
+            if gram_a is not None:
+                prices["altin_tl"] = gram_a
+            data = market_data_for_save(prices)
 
-        # Portföy Hesapla
-        total_inv, total_g = self.tm.get_summary()
-        if total_g > 0:
-            current_val = total_g * gram_g
-            profit_tl = current_val - total_inv
-            profit_pct = (profit_tl / total_inv) * 100 if total_inv > 0 else 0
+        if not data:
+            return
+
+        prices = data.get("prices", {})
+        for instrument in self.watchlist:
+            var = getattr(self, "price_vars", {}).get(instrument["key"])
+            if var:
+                var.set(format_instrument_value(instrument, prices.get(instrument["key"])))
+
+        self._update_price_row_visuals(prices)
+
+        if prices.get("dolar"):
+            self.last_dolar_rate = prices["dolar"]
+
+        current_time = time.strftime("%H:%M")
+        self.var_time.set(current_time)
+
+        # Portföy hesapla
+        summary = self.tm.get_portfolio_summary(prices, self.watchlist)
+        self.rebuild_portfolio_breakdown(summary)
+        current_val = summary.get("total_value_tl", 0)
+        total_cost = summary.get("total_cost_tl", 0)
+        profit_tl = summary.get("profit_tl", 0)
+        profit_pct = summary.get("profit_pct", 0)
+        if summary.get("rows"):
             
             self.var_portfolio.set(f"₺{current_val:,.0f}")
             
@@ -1171,11 +2205,12 @@ class PiyasaWidget:
             self.var_profit.set(f"{sign}%{profit_pct:.1f} ({sign}₺{profit_tl:,.0f})")
             
             color = self.color_success if profit_tl >= 0 else self.color_danger
-            self.lbl_profit.config(fg=color)
+            bg = self.color_success_bg if profit_tl >= 0 else self.color_danger_bg
+            self.lbl_profit.config(fg=color, bg=bg)
         else:
              self.var_portfolio.set("₺0")
              self.var_profit.set("%0.0 (₺0)")
-             self.lbl_profit.config(fg=self.color_text_dim)
+             self.lbl_profit.config(fg=self.color_text_dim, bg=self.color_card_alt)
 
     def open_add_transaction(self):
         # Güncel dolar kurunu bul
@@ -1188,7 +2223,7 @@ class PiyasaWidget:
         except:
              pass
              
-        PortfolioManagerDialog(self.root, self.tm, self.request_data_refresh, getattr(self, 'last_dolar_rate', 36.0))
+        PortfolioManagerDialog(self.root, self.tm, self.request_data_refresh, getattr(self, 'last_dolar_rate', 36.0), self.watchlist)
 
     def import_transactions(self):
         filename = filedialog.askopenfilename(title="İçe Aktarılacak Dosyayı Seç", filetypes=[("JSON Files", "*.json")])
@@ -1199,7 +2234,7 @@ class PiyasaWidget:
                 
                 if isinstance(new_data, list):
                     # Basit doğrulama: İlk öğe beklenen anahtarlara sahip mi?
-                    if new_data and ("amount_g" in new_data[0] or "total_tl" in new_data[0]):
+                    if new_data and ("amount_g" in new_data[0] or "quantity" in new_data[0] or "total_tl" in new_data[0]):
                         count = 0
                         for item in new_data:
                              self.tm.save(item) # Tek tek eklersek sürekli save çağırır, transaction manager'a bulk add eklemek daha iyi ama bu da çalışır.
@@ -1219,6 +2254,20 @@ class PiyasaWidget:
             finally:
                 # Arayüzü güncelle
                 self.request_data_refresh()
+
+    def open_watchlist_settings(self):
+        WatchlistDialog(self.root, self.watchlist_manager, self.on_watchlist_changed, self.validate_yahoo_symbol)
+
+    def on_watchlist_changed(self):
+        self.watchlist = self.watchlist_manager.instruments
+        self.rebuild_price_rows()
+        self._rebuild_chart_symbol_buttons()
+        self._rebuild_stats_sections()
+
+        last_data = self.load_last_data()
+        if last_data:
+            self.guncelle_arayuz(last_data)
+        self.request_data_refresh()
 
     def open_settings(self, event=None):
         # Menüyü fare konumunda aç
@@ -1261,8 +2310,8 @@ class PiyasaWidget:
         deltax = event.x_root - self.resize_start_x
         deltay = event.y_root - self.resize_start_y
         
-        new_width = max(260, self.start_width + deltax)
-        new_height = max(300, self.start_height + deltay)
+        new_width = max(300, self.start_width + deltax)
+        new_height = max(360, self.start_height + deltay)
         
         self.root.geometry(f"{new_width}x{new_height}")
     
@@ -1293,7 +2342,7 @@ class PiyasaWidget:
         """Fontları mevcut pencere genişliğine göre ölçekle (debounced)."""
         self._resize_after_id = None
         w = self.root.winfo_width()
-        scale = max(1.0, w / 260.0)
+        scale = max(1.0, w / 320.0)
         scale = min(1.5, scale)  # Çok büyümesin
         
         self.font_header.config(size=int(self.base_fonts["header"] * scale))
@@ -1304,6 +2353,8 @@ class PiyasaWidget:
         self.font_market_status.config(size=int(self.base_fonts["market_status"] * scale))
         self.font_nav_arrow.config(size=int(9 * scale))
         self.font_icon.config(size=int(10 * scale))
+        self.font_small.config(size=int(8 * scale))
+        self.font_badge.config(size=int(8 * scale))
         
         # Grafik sayfasındaysa güncel boyutlara göre yeniden çiz
         if hasattr(self, 'current_page') and self.current_page == 1:
