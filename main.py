@@ -27,25 +27,30 @@ except ImportError:
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 TROY_OUNCE_GRAMS = 31.1035
+SILVER_SPOT_SYMBOL = "XAG"
+SILVER_SPOT_API_URL = "https://api.gold-api.com/price/XAG"
+LEGACY_SILVER_FUTURES_SYMBOL = "SI=F"
+SILVER_SPOT_KEYS = {"gumus_ons", "gumus_tl"}
+SILVER_SPOT_SOURCES = {"silver_spot", "silver_spot_try"}
 
 DEFAULT_WATCHLIST = [
     {
         "key": "gumus_ons",
         "label": "Gümüş ONS",
-        "symbol": "SI=F",
+        "symbol": SILVER_SPOT_SYMBOL,
         "currency": "$",
         "decimals": 2,
         "color": "#ffffff",
-        "source": "direct",
+        "source": "silver_spot",
     },
     {
         "key": "gumus_tl",
         "label": "Gümüş TL",
-        "symbol": "SI=F",
+        "symbol": SILVER_SPOT_SYMBOL,
         "currency": "₺",
         "decimals": 2,
         "color": "#ffffff",
-        "source": "metal_try",
+        "source": "silver_spot_try",
     },
     {
         "key": "altin_tl",
@@ -92,6 +97,35 @@ def default_watchlist():
     return [dict(item) for item in DEFAULT_WATCHLIST]
 
 
+def reorder_instruments(instruments, ordered_keys):
+    """Return instruments in an exact, validated key order."""
+    current_keys = [item["key"] for item in instruments]
+    ordered_keys = list(ordered_keys)
+    if (
+        len(ordered_keys) != len(current_keys)
+        or len(set(ordered_keys)) != len(ordered_keys)
+        or set(ordered_keys) != set(current_keys)
+    ):
+        raise ValueError("Yeni sıra mevcut izleme listesinin tam bir eşleşmesi olmalı.")
+    by_key = {item["key"]: item for item in instruments}
+    return [by_key[key] for key in ordered_keys]
+
+
+def calculate_reordered_keys(ordered_keys, dragged_key, pointer_y, midpoints_by_key):
+    """Calculate a drag order without mutating the persisted watchlist."""
+    ordered_keys = list(ordered_keys)
+    if dragged_key not in ordered_keys:
+        return ordered_keys
+    remaining = [key for key in ordered_keys if key != dragged_key]
+    target_index = sum(
+        1
+        for key in remaining
+        if key in midpoints_by_key and pointer_y > midpoints_by_key[key]
+    )
+    remaining.insert(target_index, dragged_key)
+    return remaining
+
+
 def make_watchlist_key(label, symbol):
     raw = (symbol or label or "asset").lower()
     chars = []
@@ -127,6 +161,18 @@ def normalize_instrument(item, fallback_index=0):
     }
 
 
+def migrate_legacy_silver_instrument(instrument):
+    """Move only the two built-in silver rows from COMEX futures to spot XAG."""
+    instrument = dict(instrument)
+    key = instrument.get("key")
+    symbol = str(instrument.get("symbol") or "").strip().upper()
+    if key not in SILVER_SPOT_KEYS or symbol != LEGACY_SILVER_FUTURES_SYMBOL:
+        return instrument, False
+    instrument["symbol"] = SILVER_SPOT_SYMBOL
+    instrument["source"] = "silver_spot" if key == "gumus_ons" else "silver_spot_try"
+    return instrument, True
+
+
 def normalize_market_data(data):
     if not isinstance(data, dict):
         return None
@@ -152,8 +198,18 @@ def normalize_market_data(data):
         if value > 0:
             prices[new_key] = value
 
+    sources = {}
+    raw_sources = data.get("sources")
+    if isinstance(raw_sources, dict):
+        for key, symbol in raw_sources.items():
+            key = str(key)
+            symbol = str(symbol or "").strip().upper()
+            if key in prices and symbol:
+                sources[key] = symbol
+
     normalized = {
         "prices": prices,
+        "sources": sources,
         "timestamp": data.get("timestamp", ""),
     }
     for legacy_key, new_key in LEGACY_MARKET_FIELDS.items():
@@ -162,10 +218,16 @@ def normalize_market_data(data):
     return normalized
 
 
-def market_data_for_save(prices, timestamp=None):
+def market_data_for_save(prices, timestamp=None, sources=None):
     data = {
         "prices": {str(key): float(value) for key, value in prices.items() if value and value > 0},
         "timestamp": timestamp or time.strftime("%d.%m %H:%M"),
+    }
+    sources = sources or {}
+    data["sources"] = {
+        str(key): str(symbol).strip().upper()
+        for key, symbol in sources.items()
+        if str(key) in data["prices"] and str(symbol or "").strip()
     }
     for legacy_key, new_key in LEGACY_MARKET_FIELDS.items():
         if new_key in data["prices"]:
@@ -234,7 +296,13 @@ class WatchlistManager:
     def __init__(self, filename="watchlist.json"):
         self.filename = filename
         self.filepath = filename if os.path.isabs(filename) else app_path(filename)
+        self._loaded_with_migrations = False
         self.instruments = self.load()
+        if self._loaded_with_migrations:
+            try:
+                self.save_all()
+            except Exception as e:
+                log_message(f"İzleme listesi kaynak geçişi kaydedilemedi: {e}")
 
     def load(self):
         if not os.path.exists(self.filepath):
@@ -251,6 +319,8 @@ class WatchlistManager:
             seen_keys = set()
             for idx, item in enumerate(data):
                 instrument = normalize_instrument(item, idx)
+                instrument, migrated = migrate_legacy_silver_instrument(instrument)
+                self._loaded_with_migrations = self._loaded_with_migrations or migrated
                 key = instrument["key"]
                 if key in seen_keys:
                     base = key
@@ -311,6 +381,19 @@ class WatchlistManager:
         if len(self.instruments) == original_count:
             raise ValueError("Silinecek sembol bulunamadı.")
         self.save_all()
+
+    def reorder(self, ordered_keys):
+        previous = list(self.instruments)
+        reordered = reorder_instruments(previous, ordered_keys)
+        if [item["key"] for item in reordered] == [item["key"] for item in previous]:
+            return False
+        self.instruments = reordered
+        try:
+            self.save_all()
+        except Exception:
+            self.instruments = previous
+            raise
+        return True
 
 
 class TransactionManager:
@@ -498,12 +581,30 @@ class MarketHistoryDB:
                 timestamp TEXT NOT NULL,
                 instrument_key TEXT NOT NULL,
                 label TEXT,
+                source_symbol TEXT,
                 price REAL NOT NULL
             )
         """)
+        columns = {
+            row[1]
+            for row in self.conn.execute("PRAGMA table_info(market_price_history)").fetchall()
+        }
+        if "source_symbol" not in columns:
+            self.conn.execute(
+                "ALTER TABLE market_price_history ADD COLUMN source_symbol TEXT"
+            )
+        self.conn.execute(
+            "UPDATE market_price_history SET source_symbol = ? "
+            "WHERE source_symbol IS NULL AND instrument_key IN (?, ?)",
+            (LEGACY_SILVER_FUTURES_SYMBOL, "gumus_ons", "gumus_tl")
+        )
         self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_market_price_history_key_time
             ON market_price_history (instrument_key, timestamp)
+        """)
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_market_price_history_key_source_time
+            ON market_price_history (instrument_key, source_symbol, timestamp)
         """)
         self.conn.commit()
 
@@ -561,6 +662,12 @@ class MarketHistoryDB:
                 "altin_tl": "Altın TL",
                 "dolar": "Dolar",
             }
+            legacy_sources = {
+                "gumus_ons": LEGACY_SILVER_FUTURES_SYMBOL,
+                "gumus_tl": LEGACY_SILVER_FUTURES_SYMBOL,
+                "altin_tl": "GC=F",
+                "dolar": "TRY=X",
+            }
             for timestamp, ons_gumus, gram_gumus_tl, gram_altin_tl, dolar in rows:
                 values = {
                     "gumus_ons": ons_gumus,
@@ -571,9 +678,16 @@ class MarketHistoryDB:
                 for key, value in values.items():
                     if value and value > 0:
                         self.conn.execute(
-                            "INSERT INTO market_price_history (timestamp, instrument_key, label, price) "
-                            "VALUES (?, ?, ?, ?)",
-                            (timestamp, key, legacy_labels[key], float(value))
+                            "INSERT INTO market_price_history "
+                            "(timestamp, instrument_key, label, source_symbol, price) "
+                            "VALUES (?, ?, ?, ?, ?)",
+                            (
+                                timestamp,
+                                key,
+                                legacy_labels[key],
+                                legacy_sources[key],
+                                float(value),
+                            )
                         )
                         migrated += 1
             if migrated:
@@ -605,72 +719,79 @@ class MarketHistoryDB:
             if value <= 0:
                 continue
             label = instrument_map.get(key, {}).get("label", key)
+            source_symbol = instrument_map.get(key, {}).get("symbol")
             self.conn.execute(
-                "INSERT INTO market_price_history (timestamp, instrument_key, label, price) VALUES (?, ?, ?, ?)",
-                (timestamp, key, label, value)
+                "INSERT INTO market_price_history "
+                "(timestamp, instrument_key, label, source_symbol, price) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (timestamp, key, label, source_symbol, value)
             )
             inserted += 1
         if inserted:
             self.conn.commit()
 
-    def get_history(self, instrument_key="gumus_tl", days=7):
+    def get_history(self, instrument_key="gumus_tl", days=7, source_symbol=None):
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
-        cursor = self.conn.execute(
+        query = (
             "SELECT timestamp, price FROM market_price_history "
-            "WHERE instrument_key = ? AND timestamp >= ? AND price > 0 "
-            "ORDER BY timestamp",
-            (instrument_key, cutoff)
+            "WHERE instrument_key = ? AND timestamp >= ? AND price > 0"
         )
+        params = [instrument_key, cutoff]
+        if source_symbol:
+            query += " AND source_symbol = ?"
+            params.append(source_symbol)
+        cursor = self.conn.execute(query + " ORDER BY timestamp", tuple(params))
         return cursor.fetchall()
 
-    def get_all_history(self, instrument_key="gumus_tl"):
-        cursor = self.conn.execute(
+    def get_all_history(self, instrument_key="gumus_tl", source_symbol=None):
+        query = (
             "SELECT timestamp, price FROM market_price_history "
-            "WHERE instrument_key = ? AND price > 0 ORDER BY timestamp",
-            (instrument_key,)
+            "WHERE instrument_key = ? AND price > 0"
         )
+        params = [instrument_key]
+        if source_symbol:
+            query += " AND source_symbol = ?"
+            params.append(source_symbol)
+        cursor = self.conn.execute(query + " ORDER BY timestamp", tuple(params))
         return cursor.fetchall()
 
-    def get_stats(self, instrument_key="gumus_tl", days=None):
+    def get_stats(self, instrument_key="gumus_tl", days=None, source_symbol=None):
+        clauses = ["instrument_key = ?", "price > 0"]
+        params = [instrument_key]
         if days:
             cutoff = (datetime.now() - timedelta(days=days)).isoformat()
-            cursor = self.conn.execute("""
-                SELECT MIN(price), MAX(price), AVG(price), COUNT(*)
-                FROM market_price_history
-                WHERE instrument_key = ? AND timestamp >= ? AND price > 0
-            """, (instrument_key, cutoff))
-        else:
-            cursor = self.conn.execute("""
-                SELECT MIN(price), MAX(price), AVG(price), COUNT(*)
-                FROM market_price_history
-                WHERE instrument_key = ? AND price > 0
-            """, (instrument_key,))
+            clauses.append("timestamp >= ?")
+            params.append(cutoff)
+        if source_symbol:
+            clauses.append("source_symbol = ?")
+            params.append(source_symbol)
+        cursor = self.conn.execute(
+            "SELECT MIN(price), MAX(price), AVG(price), COUNT(*) "
+            "FROM market_price_history WHERE " + " AND ".join(clauses),
+            tuple(params)
+        )
         return cursor.fetchone()
 
-    def get_first_last(self, instrument_key="gumus_tl", days=None):
+    def get_first_last(self, instrument_key="gumus_tl", days=None, source_symbol=None):
+        clauses = ["instrument_key = ?", "price > 0"]
+        params = [instrument_key]
         if days:
             cutoff = (datetime.now() - timedelta(days=days)).isoformat()
-            first = self.conn.execute(
-                "SELECT price FROM market_price_history "
-                "WHERE instrument_key = ? AND timestamp >= ? AND price > 0 ORDER BY timestamp ASC LIMIT 1",
-                (instrument_key, cutoff)
-            ).fetchone()
-            last = self.conn.execute(
-                "SELECT price FROM market_price_history "
-                "WHERE instrument_key = ? AND timestamp >= ? AND price > 0 ORDER BY timestamp DESC LIMIT 1",
-                (instrument_key, cutoff)
-            ).fetchone()
-        else:
-            first = self.conn.execute(
-                "SELECT price FROM market_price_history "
-                "WHERE instrument_key = ? AND price > 0 ORDER BY timestamp ASC LIMIT 1",
-                (instrument_key,)
-            ).fetchone()
-            last = self.conn.execute(
-                "SELECT price FROM market_price_history "
-                "WHERE instrument_key = ? AND price > 0 ORDER BY timestamp DESC LIMIT 1",
-                (instrument_key,)
-            ).fetchone()
+            clauses.append("timestamp >= ?")
+            params.append(cutoff)
+        if source_symbol:
+            clauses.append("source_symbol = ?")
+            params.append(source_symbol)
+        base_query = (
+            "SELECT price FROM market_price_history WHERE "
+            + " AND ".join(clauses)
+        )
+        first = self.conn.execute(
+            base_query + " ORDER BY timestamp ASC LIMIT 1", tuple(params)
+        ).fetchone()
+        last = self.conn.execute(
+            base_query + " ORDER BY timestamp DESC LIMIT 1", tuple(params)
+        ).fetchone()
         return first, last
 
 class AutoStartManager:
@@ -1287,6 +1408,14 @@ class PiyasaWidget:
         self.current_page = 0
         self._fetch_lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._row_hold_after_id = None
+        self._row_press_key = None
+        self._row_press_origin = None
+        self._row_press_last = None
+        self._row_drag_key = None
+        self._row_drag_order = None
+        self._row_drag_original_order = None
+        self.price_row_widgets = {}
         
         # UI Elemanları
         self.setup_ui()
@@ -1471,6 +1600,7 @@ class PiyasaWidget:
         self.price_change_vars = {}
         self.price_change_labels = {}
         self.price_spark_canvases = {}
+        self.price_row_widgets = {}
         self.rebuild_price_rows()
 
         # --- Sayfa 1: Grafik Sayfası ---
@@ -1501,7 +1631,8 @@ class PiyasaWidget:
         row.pack(fill="x", pady=3)
         row.grid_columnconfigure(1, weight=1)
 
-        tk.Label(row, text=instrument["label"], bg=self.color_card_alt, fg=self.color_text_dim, font=self.font_label, anchor="w").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        name_label = tk.Label(row, text=instrument["label"], bg=self.color_card_alt, fg=self.color_text_dim, font=self.font_label, anchor="w")
+        name_label.grid(row=0, column=0, sticky="w", padx=(0, 8))
 
         spark = tk.Canvas(row, width=64, height=20, bg=self.color_card_alt, highlightthickness=0)
         spark.grid(row=0, column=1, sticky="ew", padx=(0, 8))
@@ -1515,7 +1646,8 @@ class PiyasaWidget:
             self.var_gumus_tl = var
         elif instrument["key"] == "altin_tl":
             self.var_altin_tl = var
-        tk.Label(row, textvariable=var, bg=self.color_card_alt, fg=instrument.get("color", self.color_text_main), font=self.font_value, anchor="e").grid(row=0, column=2, sticky="e", padx=(0, 7))
+        price_label = tk.Label(row, textvariable=var, bg=self.color_card_alt, fg=instrument.get("color", self.color_text_main), font=self.font_value, anchor="e")
+        price_label.grid(row=0, column=2, sticky="e", padx=(0, 7))
 
         change_var = tk.StringVar(value="--")
         self.price_change_vars[instrument["key"]] = change_var
@@ -1523,18 +1655,172 @@ class PiyasaWidget:
         badge.grid(row=0, column=3, sticky="e")
         self.price_change_labels[instrument["key"]] = badge
         self.price_spark_canvases[instrument["key"]] = spark
+        self.price_row_widgets[instrument["key"]] = row
+        self._bind_price_row_drag(
+            (row, name_label, spark, price_label, badge),
+            instrument["key"]
+        )
 
     def rebuild_price_rows(self):
         if not hasattr(self, "price_rows_frame"):
             return
+        self._cancel_price_row_drag(restore=True)
         for child in self.price_rows_frame.winfo_children():
             child.destroy()
         self.price_vars = {}
         self.price_change_vars = {}
         self.price_change_labels = {}
         self.price_spark_canvases = {}
+        self.price_row_widgets = {}
         for instrument in self.watchlist:
             self.create_price_row(instrument, self.price_rows_frame)
+
+    def _bind_price_row_drag(self, widgets, key):
+        for widget in widgets:
+            widget.config(cursor="hand2")
+            widget.bind(
+                "<ButtonPress-1>",
+                lambda event, item_key=key: self._on_price_row_press(event, item_key),
+                add="+"
+            )
+            widget.bind(
+                "<B1-Motion>",
+                lambda event, item_key=key: self._on_price_row_motion(event, item_key),
+                add="+"
+            )
+            widget.bind(
+                "<ButtonRelease-1>",
+                lambda event, item_key=key: self._on_price_row_release(event, item_key),
+                add="+"
+            )
+
+    def _on_price_row_press(self, event, key):
+        self._cancel_price_row_drag(restore=True)
+        self._row_press_key = key
+        self._row_press_origin = (event.x_root, event.y_root)
+        self._row_press_last = self._row_press_origin
+        self._row_hold_after_id = self.root.after(
+            400, lambda item_key=key: self._activate_price_row_drag(item_key)
+        )
+        # Root binding may still prepare normal window dragging. Motion is
+        # intercepted only after the long press becomes a row drag.
+        return None
+
+    def _activate_price_row_drag(self, key):
+        self._row_hold_after_id = None
+        if self._row_press_key != key or not self._row_press_origin:
+            return
+        last = self._row_press_last or self._row_press_origin
+        dx = last[0] - self._row_press_origin[0]
+        dy = last[1] - self._row_press_origin[1]
+        if (dx * dx) + (dy * dy) > 36:
+            self._cancel_price_row_drag()
+            return
+
+        self._row_drag_key = key
+        self._row_drag_original_order = [item["key"] for item in self.watchlist]
+        self._row_drag_order = list(self._row_drag_original_order)
+        row = self.price_row_widgets.get(key)
+        if row:
+            row.config(highlightbackground=self.color_accent)
+        self.root.config(cursor="fleur")
+
+    def _on_price_row_motion(self, event, key):
+        if self._row_press_key != key:
+            return None
+        self._row_press_last = (event.x_root, event.y_root)
+
+        if self._row_drag_key != key:
+            origin = self._row_press_origin
+            if origin:
+                dx = event.x_root - origin[0]
+                dy = event.y_root - origin[1]
+                if (dx * dx) + (dy * dy) > 36:
+                    self._cancel_price_row_drag()
+                    return None
+            return "break"
+
+        self.root.update_idletasks()
+        midpoints = {}
+        for item_key in self._row_drag_order or []:
+            if item_key == key:
+                continue
+            row = self.price_row_widgets.get(item_key)
+            if row and row.winfo_exists():
+                midpoints[item_key] = row.winfo_rooty() + (row.winfo_height() / 2)
+        new_order = calculate_reordered_keys(
+            self._row_drag_order,
+            key,
+            event.y_root,
+            midpoints
+        )
+        if new_order != self._row_drag_order:
+            self._row_drag_order = new_order
+            self._layout_price_rows(new_order)
+        return "break"
+
+    def _on_price_row_release(self, event, key):
+        if self._row_drag_key != key:
+            self._cancel_price_row_drag()
+            return None
+
+        original_order = list(self._row_drag_original_order or [])
+        final_order = list(self._row_drag_order or original_order)
+        try:
+            self.watchlist_manager.reorder(final_order)
+        except Exception as e:
+            log_message(f"İzleme listesi sırası kaydedilemedi: {e}")
+            self._layout_price_rows(original_order)
+        else:
+            self.watchlist = self.watchlist_manager.instruments
+            self._layout_price_rows([item["key"] for item in self.watchlist])
+            try:
+                if hasattr(self, "chart_symbol_frame"):
+                    self._rebuild_chart_symbol_buttons()
+                if hasattr(self, "stats_frame"):
+                    self._rebuild_stats_sections()
+            except Exception as e:
+                log_message(f"Bağlı görünüm sırası yenilenemedi: {e}")
+        finally:
+            self._cancel_price_row_drag()
+        return "break"
+
+    def _layout_price_rows(self, ordered_keys):
+        rows = []
+        for key in ordered_keys:
+            row = self.price_row_widgets.get(key)
+            if row and row.winfo_exists():
+                rows.append(row)
+        for row in rows:
+            row.pack_forget()
+        for row in rows:
+            row.pack(fill="x", pady=3)
+
+    def _cancel_price_row_drag(self, restore=False):
+        after_id = getattr(self, "_row_hold_after_id", None)
+        if after_id is not None and hasattr(self, "root"):
+            try:
+                self.root.after_cancel(after_id)
+            except (tk.TclError, ValueError):
+                pass
+        if restore and getattr(self, "_row_drag_original_order", None):
+            self._layout_price_rows(self._row_drag_original_order)
+        drag_key = getattr(self, "_row_drag_key", None)
+        row = getattr(self, "price_row_widgets", {}).get(drag_key)
+        if row and row.winfo_exists():
+            row.config(highlightbackground=self.color_border)
+        if hasattr(self, "root"):
+            try:
+                self.root.config(cursor="")
+            except tk.TclError:
+                pass
+        self._row_hold_after_id = None
+        self._row_press_key = None
+        self._row_press_origin = None
+        self._row_press_last = None
+        self._row_drag_key = None
+        self._row_drag_order = None
+        self._row_drag_original_order = None
 
     def _format_change(self, change_pct):
         if change_pct is None:
@@ -1544,7 +1830,11 @@ class PiyasaWidget:
 
     def _get_change_pct(self, key, current_value):
         try:
-            first, last = self.history_db.get_first_last(key, days=7)
+            first, last = self.history_db.get_first_last(
+                key,
+                days=7,
+                source_symbol=self._history_source_symbol(key)
+            )
         except Exception:
             return None
         first_value = None
@@ -1572,7 +1862,11 @@ class PiyasaWidget:
     def _get_sparkline_values(self, key, current_value):
         values = []
         try:
-            data = self.history_db.get_history(key, days=7)
+            data = self.history_db.get_history(
+                key,
+                days=7,
+                source_symbol=self._history_source_symbol(key)
+            )
         except Exception:
             data = []
         if isinstance(data, (list, tuple)):
@@ -1746,6 +2040,16 @@ class PiyasaWidget:
                 return instrument
         return self.watchlist[0] if self.watchlist else None
 
+    def _history_source_symbol(self, key):
+        instrument = self._instrument_by_key(key)
+        if (
+            instrument
+            and key in SILVER_SPOT_KEYS
+            and instrument.get("symbol") == SILVER_SPOT_SYMBOL
+        ):
+            return SILVER_SPOT_SYMBOL
+        return None
+
     def _rebuild_chart_symbol_buttons(self):
         if not hasattr(self, "chart_symbol_frame"):
             return
@@ -1826,10 +2130,15 @@ class PiyasaWidget:
             
             days = self.chart_period.get()
             selected = self.chart_var.get()
+            source_symbol = self._history_source_symbol(selected)
             if days == 0:
-                data = self.history_db.get_all_history(selected)
+                data = self.history_db.get_all_history(
+                    selected, source_symbol=source_symbol
+                )
             else:
-                data = self.history_db.get_history(selected, days=days)
+                data = self.history_db.get_history(
+                    selected, days=days, source_symbol=source_symbol
+                )
             
             if not data:
                 self.chart_canvas.create_text(cw//2, ch//2, text="Veri yok", fill="#aaaaaa", font=("Segoe UI", f_no_data))
@@ -1997,8 +2306,13 @@ class PiyasaWidget:
                 if not labels:
                     continue
 
-                stats = self.history_db.get_stats(key, days=days_param)
-                first_last = self.history_db.get_first_last(key, days=days_param)
+                source_symbol = self._history_source_symbol(key)
+                stats = self.history_db.get_stats(
+                    key, days=days_param, source_symbol=source_symbol
+                )
+                first_last = self.history_db.get_first_last(
+                    key, days=days_param, source_symbol=source_symbol
+                )
 
                 if not stats or stats[3] == 0:
                     labels["min"].config(text="Min: --")
@@ -2074,7 +2388,16 @@ class PiyasaWidget:
                 return
             filepath = getattr(self, "market_data_path", app_path("market_data.json"))
             with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(market_data_for_save(normalized["prices"], normalized.get("timestamp")), f, indent=4, ensure_ascii=False)
+                json.dump(
+                    market_data_for_save(
+                        normalized["prices"],
+                        normalized.get("timestamp"),
+                        normalized.get("sources")
+                    ),
+                    f,
+                    indent=4,
+                    ensure_ascii=False
+                )
         except Exception as e:
             log_message(f"Veri kaydetme hatası: {e}")
 
@@ -2096,8 +2419,6 @@ class PiyasaWidget:
                 for key in (
                     "last_price", "lastPrice",
                     "regular_market_price", "regularMarketPrice",
-                    "previous_close", "previousClose",
-                    "regular_market_previous_close", "regularMarketPreviousClose",
                     "bid",
                 ):
                     try:
@@ -2111,7 +2432,7 @@ class PiyasaWidget:
 
         try:
             info = ticker.info
-            val = info.get("regularMarketPrice") or info.get("previousClose") or info.get("bid") or 0
+            val = info.get("regularMarketPrice") or info.get("bid") or 0
             return float(val) if val and val > 0 else 0
         except:
             return 0
@@ -2119,10 +2440,58 @@ class PiyasaWidget:
     def _required_yahoo_symbols(self):
         symbols = set()
         for instrument in self.watchlist:
-            symbols.add(instrument["symbol"])
-            if instrument.get("source") == "metal_try" or instrument.get("currency") == "$":
+            source = instrument.get("source")
+            if source not in SILVER_SPOT_SOURCES:
+                symbols.add(instrument["symbol"])
+            if source in ("metal_try", "silver_spot_try") or instrument.get("currency") == "$":
                 symbols.add("TRY=X")
         return sorted(symbols)
+
+    @staticmethod
+    def _fetch_spot_silver_price():
+        try:
+            response = requests.get(
+                SILVER_SPOT_API_URL,
+                headers={"User-Agent": "Disa-Finans-Widget/1.0"},
+                timeout=10
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if (
+                str(payload.get("symbol", "")).upper() != SILVER_SPOT_SYMBOL
+                or str(payload.get("currency", "")).upper() != "USD"
+            ):
+                return 0
+            price = safe_float(payload.get("price"), 0)
+            return price if 1 < price < 1000 else 0
+        except Exception as e:
+            log_message(f"Spot gümüş verisi alınamadı: {e}")
+            return 0
+
+    def _watchlist_price_sources(self):
+        return {
+            instrument["key"]: instrument["symbol"]
+            for instrument in self.watchlist
+        }
+
+    def _compatible_cached_data(self, data):
+        data = normalize_market_data(data)
+        if not data:
+            return None
+        prices = dict(data.get("prices", {}))
+        sources = dict(data.get("sources", {}))
+        for instrument in self.watchlist:
+            key = instrument["key"]
+            if instrument.get("source") not in SILVER_SPOT_SOURCES:
+                continue
+            if sources.get(key) != SILVER_SPOT_SYMBOL:
+                prices.pop(key, None)
+                sources.pop(key, None)
+        return market_data_for_save(
+            prices,
+            timestamp=data.get("timestamp"),
+            sources=sources
+        )
 
     def _fetch_raw_prices(self, symbols):
         if not symbols:
@@ -2152,14 +2521,14 @@ class PiyasaWidget:
         last_prices = last_prices or {}
         prices = {}
         fresh_keys = set()
-        dolar = raw_prices.get("TRY=X")
+        dolar = raw_prices.get("TRY=X") or last_prices.get("dolar")
 
         for instrument in self.watchlist:
             key = instrument["key"]
             symbol = instrument["symbol"]
             value = 0
 
-            if instrument.get("source") == "metal_try":
+            if instrument.get("source") in ("metal_try", "silver_spot_try"):
                 base_price = raw_prices.get(symbol)
                 if base_price and dolar:
                     value = (base_price * dolar) / TROY_OUNCE_GRAMS
@@ -2190,7 +2559,7 @@ class PiyasaWidget:
                         self.var_market_label.set("Piyasa Kapalı")
                     
                     # Kayıtlı son veriyi yükle
-                    last_data = self.load_last_data()
+                    last_data = self._compatible_cached_data(self.load_last_data())
                     if last_data:
                         self.guncelle_arayuz(last_data)
                         # Dolar kurunu da güncelle, portföy hesaplamaları için gerekebilir
@@ -2212,16 +2581,32 @@ class PiyasaWidget:
             
             self.root.after(0, set_open_ui)
 
-            last_data = self.load_last_data()
+            last_data = self._compatible_cached_data(self.load_last_data())
             last_prices = last_data.get("prices", {}) if last_data else {}
 
-            raw_prices = self._fetch_raw_prices(self._required_yahoo_symbols())
+            raw_prices = {}
+            if any(
+                item.get("source") in SILVER_SPOT_SOURCES
+                for item in self.watchlist
+            ):
+                spot_silver = self._fetch_spot_silver_price()
+                if spot_silver:
+                    raw_prices[SILVER_SPOT_SYMBOL] = spot_silver
+            try:
+                raw_prices.update(
+                    self._fetch_raw_prices(self._required_yahoo_symbols())
+                )
+            except Exception as e:
+                log_message(f"Yahoo Finance verisi alınamadı: {e}")
             if raw_prices.get("TRY=X"):
                 self.last_dolar_rate = raw_prices["TRY=X"]
             prices, fresh_keys = self._resolve_watchlist_prices(raw_prices, last_prices)
 
             if fresh_keys:
-                market_data = market_data_for_save(prices)
+                market_data = market_data_for_save(
+                    prices,
+                    sources=self._watchlist_price_sources()
+                )
                 self.save_last_data(market_data)
                 fresh_prices = {key: prices[key] for key in fresh_keys}
                 self.history_db.insert_prices(fresh_prices, self.watchlist)
@@ -2246,7 +2631,7 @@ class PiyasaWidget:
                 self.root.after(0, set_error_ui)
             
         except Exception as e:
-            last_data = self.load_last_data()
+            last_data = self._compatible_cached_data(self.load_last_data())
             if last_data:
                 def set_error_cached_ui():
                     self.guncelle_arayuz(last_data)
@@ -2370,7 +2755,7 @@ class PiyasaWidget:
         self._rebuild_chart_symbol_buttons()
         self._rebuild_stats_sections()
 
-        last_data = self.load_last_data()
+        last_data = self._compatible_cached_data(self.load_last_data())
         if last_data:
             self.guncelle_arayuz(last_data)
         self.request_data_refresh()
@@ -2476,7 +2861,7 @@ class PiyasaWidget:
 
     def do_move(self, event):
         # Resize sırasında pencereyi sürükleme
-        if self._is_resizing:
+        if self._is_resizing or self._row_drag_key is not None:
             return
         deltax = event.x - self.x
         deltay = event.y - self.y

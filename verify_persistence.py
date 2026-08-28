@@ -99,18 +99,22 @@ class TestDynamicMarketPersistence(unittest.TestCase):
     def test_open_market_fetch_saves_thyao_and_dynamic_history(self):
         self.widget.is_market_closed = MagicMock(return_value=False)
         prices = {
-            "SI=F": 30.0,
             "GC=F": 2500.0,
             "TRY=X": 40.0,
             "THYAO.IS": 300.0,
         }
 
-        with patch.object(main.yf, "Tickers", return_value=FakeTickers(prices)):
+        with (
+            patch.object(main.yf, "Tickers", return_value=FakeTickers(prices)),
+            patch.object(self.widget, "_fetch_spot_silver_price", return_value=30.0),
+        ):
             self.widget.veri_getir()
 
         loaded = self.widget.load_last_data()
         self.assertEqual(loaded["prices"]["thyao"], 300.0)
+        self.assertEqual(loaded["prices"]["gumus_ons"], 30.0)
         self.assertAlmostEqual(loaded["prices"]["gumus_tl"], (30.0 * 40.0) / main.TROY_OUNCE_GRAMS)
+        self.assertEqual(loaded["sources"]["gumus_ons"], main.SILVER_SPOT_SYMBOL)
         self.widget.price_vars["thyao"].set.assert_called_with("₺300.00")
 
         inserted_prices = self.widget.history_db.insert_prices.call_args.args[0]
@@ -129,6 +133,59 @@ class TestDynamicMarketPersistence(unittest.TestCase):
         }]
 
         self.assertIn("TRY=X", widget._required_yahoo_symbols())
+        self.assertNotIn(
+            main.SILVER_SPOT_SYMBOL,
+            self.widget._required_yahoo_symbols()
+        )
+
+    def test_previous_close_is_not_presented_as_a_live_quote(self):
+        ticker = MagicMock()
+        ticker.fast_info = {"previous_close": 71.0}
+        ticker.info = {"previousClose": 71.0}
+
+        self.assertEqual(self.widget._extract_price(ticker), 0)
+
+    def test_spot_silver_endpoint_is_validated(self):
+        response = MagicMock()
+        response.json.return_value = {
+            "symbol": "XAG",
+            "currency": "USD",
+            "price": 70.35,
+        }
+        with patch.object(main.requests, "get", return_value=response) as get:
+            price = self.widget._fetch_spot_silver_price()
+
+        self.assertEqual(price, 70.35)
+        get.assert_called_once_with(
+            main.SILVER_SPOT_API_URL,
+            headers={"User-Agent": "Disa-Finans-Widget/1.0"},
+            timeout=10
+        )
+
+    def test_spot_gram_price_can_use_last_known_dollar_rate(self):
+        prices, fresh = self.widget._resolve_watchlist_prices(
+            {main.SILVER_SPOT_SYMBOL: 70.0},
+            {"dolar": 40.0}
+        )
+
+        self.assertIn("gumus_tl", fresh)
+        self.assertAlmostEqual(
+            prices["gumus_tl"],
+            (70.0 * 40.0) / main.TROY_OUNCE_GRAMS
+        )
+
+    def test_legacy_futures_cache_is_not_reused_for_spot_rows(self):
+        cached = main.market_data_for_save({
+            "gumus_ons": 71.0,
+            "gumus_tl": 103.0,
+            "thyao": 300.0,
+        })
+
+        compatible = self.widget._compatible_cached_data(cached)
+
+        self.assertNotIn("gumus_ons", compatible["prices"])
+        self.assertNotIn("gumus_tl", compatible["prices"])
+        self.assertEqual(compatible["prices"]["thyao"], 300.0)
 
     def test_legacy_history_is_migrated_to_dynamic_table(self):
         db_path = os.path.join(self.tmp.name, "history.db")
@@ -155,6 +212,40 @@ class TestDynamicMarketPersistence(unittest.TestCase):
             stats = db.get_stats("gumus_tl")
             self.assertEqual(stats[3], 1)
             self.assertEqual(stats[0], 40.0)
+        finally:
+            db.conn.close()
+
+    def test_silver_history_can_be_filtered_by_quote_source(self):
+        db_path = os.path.join(self.tmp.name, "source_history.db")
+        db = main.MarketHistoryDB(db_path)
+        try:
+            futures = [{
+                "key": "gumus_ons",
+                "label": "Gümüş ONS",
+                "symbol": main.LEGACY_SILVER_FUTURES_SYMBOL,
+            }]
+            spot = [{
+                "key": "gumus_ons",
+                "label": "Gümüş ONS",
+                "symbol": main.SILVER_SPOT_SYMBOL,
+            }]
+            now = main.datetime.now()
+            db.insert_prices(
+                {"gumus_ons": 71.0},
+                futures,
+                timestamp=(now - main.timedelta(minutes=1)).isoformat()
+            )
+            db.insert_prices(
+                {"gumus_ons": 70.0},
+                spot,
+                timestamp=now.isoformat()
+            )
+
+            rows = db.get_history(
+                "gumus_ons", days=1, source_symbol=main.SILVER_SPOT_SYMBOL
+            )
+
+            self.assertEqual([row[1] for row in rows], [70.0])
         finally:
             db.conn.close()
 
@@ -270,6 +361,77 @@ class TestWatchlistManager(unittest.TestCase):
 
             manager_reloaded = main.WatchlistManager(path)
             self.assertTrue(manager_reloaded.has_symbol("AAPL"))
+
+    def test_legacy_builtin_silver_symbols_migrate_to_spot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "watchlist.json")
+            manager = main.WatchlistManager(path)
+            for instrument in manager.instruments:
+                if instrument["key"] in main.SILVER_SPOT_KEYS:
+                    instrument["symbol"] = main.LEGACY_SILVER_FUTURES_SYMBOL
+                    instrument["source"] = (
+                        "direct" if instrument["key"] == "gumus_ons" else "metal_try"
+                    )
+            manager.save_all()
+
+            migrated = main.WatchlistManager(path)
+            silver = {
+                item["key"]: item
+                for item in migrated.instruments
+                if item["key"] in main.SILVER_SPOT_KEYS
+            }
+
+            self.assertEqual(silver["gumus_ons"]["symbol"], main.SILVER_SPOT_SYMBOL)
+            self.assertEqual(silver["gumus_ons"]["source"], "silver_spot")
+            self.assertEqual(silver["gumus_tl"]["symbol"], main.SILVER_SPOT_SYMBOL)
+            self.assertEqual(silver["gumus_tl"]["source"], "silver_spot_try")
+            self.assertEqual(
+                main.WatchlistManager(path).instruments,
+                migrated.instruments
+            )
+
+    def test_reordered_rows_are_persistent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "watchlist.json")
+            manager = main.WatchlistManager(path)
+            reversed_keys = [item["key"] for item in reversed(manager.instruments)]
+
+            self.assertTrue(manager.reorder(reversed_keys))
+
+            reloaded = main.WatchlistManager(path)
+            self.assertEqual(
+                [item["key"] for item in reloaded.instruments],
+                reversed_keys
+            )
+
+    def test_reorder_rejects_non_permutations_without_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = main.WatchlistManager(os.path.join(tmp, "watchlist.json"))
+            original = [item["key"] for item in manager.instruments]
+
+            with self.assertRaises(ValueError):
+                manager.reorder(original[:-1])
+            with self.assertRaises(ValueError):
+                manager.reorder(original[:-1] + [original[0]])
+
+            self.assertEqual([item["key"] for item in manager.instruments], original)
+
+    def test_drag_order_uses_row_midpoints(self):
+        keys = ["a", "b", "c", "d"]
+        midpoints = {"a": 10, "b": 20, "d": 40}
+
+        self.assertEqual(
+            main.calculate_reordered_keys(keys, "c", 0, midpoints),
+            ["c", "a", "b", "d"]
+        )
+        self.assertEqual(
+            main.calculate_reordered_keys(keys, "c", 25, midpoints),
+            ["a", "b", "c", "d"]
+        )
+        self.assertEqual(
+            main.calculate_reordered_keys(keys, "c", 100, midpoints),
+            ["a", "b", "d", "c"]
+        )
 
 
 if __name__ == "__main__":
