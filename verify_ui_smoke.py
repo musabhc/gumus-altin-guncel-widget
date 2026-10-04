@@ -14,6 +14,7 @@ import os
 import tempfile
 import tkinter as tk
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import main
@@ -99,14 +100,18 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         candidate = os.path.realpath(path)
         self.assertEqual(os.path.commonpath((temp_root, candidate)), temp_root)
 
-    def test_piyasa_widget_builds_hidden_with_required_state(self):
-        self._require_tk()
-
-        # Assign the instance before __init__ so cleanup can recover a root or
-        # database connection even if a later construction assertion fails.
+    def _build_piyasa_widget(self):
+        # Assign before __init__ so cleanup can recover a partially built root.
         self.app = main.PiyasaWidget.__new__(main.PiyasaWidget)
         main.PiyasaWidget.__init__(self.app)
         self.app.root.withdraw()
+        self.app.root.update_idletasks()
+        return self.app
+
+    def test_piyasa_widget_builds_hidden_with_required_state(self):
+        self._require_tk()
+
+        self._build_piyasa_widget()
 
         self.assertEqual(self.app.root.state(), "withdrawn")
         self.assertEqual(
@@ -147,6 +152,81 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         self.assert_temp_path(self.app.watchlist_manager.filepath)
         self.assert_temp_path(self.app.history_db.db_path)
         self.assertTrue(os.path.exists(self.app.history_db.db_path))
+
+    def test_price_row_short_click_opens_selected_chart(self):
+        self._require_tk()
+        self._build_piyasa_widget()
+
+        selected_key = self.app.watchlist[-1]["key"]
+        click = SimpleNamespace(x_root=120, y_root=240)
+
+        self.assertEqual(self.app.ROW_DRAG_HOLD_MS, 1000)
+        with patch.object(
+            self.app.root,
+            "after",
+            wraps=self.app.root.after,
+        ) as schedule:
+            self.assertIsNone(self.app._on_price_row_press(click, selected_key))
+        self.assertEqual(schedule.call_args.args[0], 1000)
+        self.assertIsNotNone(self.app._row_hold_after_id)
+        self.assertEqual(
+            self.app._on_price_row_release(click, selected_key),
+            "break",
+        )
+
+        self.assertEqual(self.app.chart_var.get(), selected_key)
+        self.assertEqual(self.app.current_page, 1)
+        self.assertIsNone(self.app._row_hold_after_id)
+        self.assertIsNone(self.app._row_press_key)
+
+    def test_price_row_early_motion_does_not_open_chart(self):
+        self._require_tk()
+        self._build_piyasa_widget()
+
+        selected_key = self.app.watchlist[-1]["key"]
+        initial_chart_key = self.app.chart_var.get()
+        press = SimpleNamespace(x_root=120, y_root=240)
+        moved = SimpleNamespace(x_root=127, y_root=240)
+
+        self.assertIsNone(self.app._on_price_row_press(press, selected_key))
+        self.assertIsNone(self.app._on_price_row_motion(moved, selected_key))
+        self.assertIsNone(self.app._row_press_key)
+        self.assertIsNone(self.app._on_price_row_release(moved, selected_key))
+
+        self.assertEqual(self.app.chart_var.get(), initial_chart_key)
+        self.assertEqual(self.app.current_page, 0)
+
+    def test_price_row_long_press_reorder_persists(self):
+        self._require_tk()
+        self._build_piyasa_widget()
+
+        original_order = [item["key"] for item in self.app.watchlist]
+        dragged_key = original_order[0]
+        final_order = original_order[1:] + [dragged_key]
+        press = SimpleNamespace(x_root=120, y_root=240)
+
+        self.assertIsNone(self.app._on_price_row_press(press, dragged_key))
+        self.app.root.after_cancel(self.app._row_hold_after_id)
+        self.app._row_hold_after_id = None
+        self.app._activate_price_row_drag(dragged_key)
+        self.assertEqual(self.app._row_drag_key, dragged_key)
+
+        self.app._row_drag_order = final_order
+        self.assertEqual(
+            self.app._on_price_row_release(press, dragged_key),
+            "break",
+        )
+
+        self.assertEqual(
+            [item["key"] for item in self.app.watchlist],
+            final_order,
+        )
+        reloaded = main.WatchlistManager(self.app.watchlist_manager.filepath)
+        self.assertEqual(
+            [item["key"] for item in reloaded.instruments],
+            final_order,
+        )
+        self.assertEqual(self.app.current_page, 0)
 
     def test_portfolio_dialog_search_filter_and_source_indices(self):
         self._require_tk()

@@ -1805,6 +1805,9 @@ class WatchlistDialog(tk.Toplevel):
 
 
 class PiyasaWidget:
+    ROW_DRAG_HOLD_MS = 1000
+    ROW_DRAG_MOVE_TOLERANCE_PX = 6
+
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Market Widget")
@@ -2240,10 +2243,12 @@ class PiyasaWidget:
         self._row_press_origin = (event.x_root, event.y_root)
         self._row_press_last = self._row_press_origin
         self._row_hold_after_id = self.root.after(
-            400, lambda item_key=key: self._activate_price_row_drag(item_key)
+            self.ROW_DRAG_HOLD_MS,
+            lambda item_key=key: self._activate_price_row_drag(item_key),
         )
-        # Root binding may still prepare normal window dragging. Motion is
-        # intercepted only after the long press becomes a row drag.
+        # Keep the existing quick window-drag gesture available. Row motion
+        # starts intercepting events only while this press remains a click or
+        # after the one-second hold activates reordering.
         return None
 
     def _activate_price_row_drag(self, key):
@@ -2253,7 +2258,8 @@ class PiyasaWidget:
         last = self._row_press_last or self._row_press_origin
         dx = last[0] - self._row_press_origin[0]
         dy = last[1] - self._row_press_origin[1]
-        if (dx * dx) + (dy * dy) > 36:
+        tolerance = self.ROW_DRAG_MOVE_TOLERANCE_PX
+        if (dx * dx) + (dy * dy) > tolerance * tolerance:
             self._cancel_price_row_drag()
             return
 
@@ -2275,7 +2281,8 @@ class PiyasaWidget:
             if origin:
                 dx = event.x_root - origin[0]
                 dy = event.y_root - origin[1]
-                if (dx * dx) + (dy * dy) > 36:
+                tolerance = self.ROW_DRAG_MOVE_TOLERANCE_PX
+                if (dx * dx) + (dy * dy) > tolerance * tolerance:
                     self._cancel_price_row_drag()
                     return None
             return "break"
@@ -2301,7 +2308,17 @@ class PiyasaWidget:
 
     def _on_price_row_release(self, event, key):
         if self._row_drag_key != key:
+            origin = self._row_press_origin
+            is_click = self._row_press_key == key and origin is not None
+            if is_click:
+                dx = event.x_root - origin[0]
+                dy = event.y_root - origin[1]
+                tolerance = self.ROW_DRAG_MOVE_TOLERANCE_PX
+                is_click = (dx * dx) + (dy * dy) <= tolerance * tolerance
             self._cancel_price_row_drag()
+            if is_click:
+                self._open_price_row_chart(key)
+                return "break"
             return None
 
         original_order = list(self._row_drag_original_order or [])
@@ -2324,6 +2341,14 @@ class PiyasaWidget:
         finally:
             self._cancel_price_row_drag()
         return "break"
+
+    def _open_price_row_chart(self, key):
+        """Open the chart page with the clicked watchlist instrument selected."""
+        valid_keys = {item["key"] for item in self.watchlist}
+        if key not in valid_keys or not hasattr(self, "chart_var"):
+            return
+        self.chart_var.set(key)
+        self.show_page(1)
 
     def _layout_price_rows(self, ordered_keys):
         rows = []
