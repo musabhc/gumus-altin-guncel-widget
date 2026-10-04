@@ -1,34 +1,30 @@
-from datetime import datetime
+"""Deterministic boundary checks for the widget's market-hours rule."""
 
-def is_market_closed():
-    """
-    Piyasa Kapalı mı kontrolü (Türkiye saati varsayımıyla):
-    Kapanış: Cumartesi 01:00
-    Açılış: Pazartesi 02:00
-    """
-    now = datetime.now()
-    print(f"Current time: {now}")
-    weekday = now.weekday() # 0: Pzt, 6: Paz
-    print(f"Weekday: {weekday}")
-    hour = now.hour
-    print(f"Hour: {hour}")
-    
-    # Cumartesi (5)
-    if weekday == 5:
-        return hour >= 1
-    # Pazar (6)
-    if weekday == 6:
-        return True
-    # Pazartesi (0)
-    if weekday == 0:
-        return hour < 2
-        
-    return False
+from datetime import datetime
+from unittest import TestCase, main as unittest_main
+from unittest.mock import patch
+
+import main
+
+
+class TestMarketHours(TestCase):
+    CASES = (
+        ("Friday evening", datetime(2026, 10, 2, 23, 30), False),
+        ("Saturday before close", datetime(2026, 10, 3, 0, 59), False),
+        ("Saturday at close", datetime(2026, 10, 3, 1, 0), True),
+        ("Sunday", datetime(2026, 10, 4, 12, 0), True),
+        ("Monday before open", datetime(2026, 10, 5, 1, 59), True),
+        ("Monday at open", datetime(2026, 10, 5, 2, 0), False),
+        ("Tuesday", datetime(2026, 10, 6, 12, 0), False),
+    )
+
+    def test_market_boundaries(self):
+        widget = main.PiyasaWidget.__new__(main.PiyasaWidget)
+        for label, current_time, expected_closed in self.CASES:
+            with self.subTest(label=label), patch.object(main, "datetime") as mocked_datetime:
+                mocked_datetime.now.return_value = current_time
+                self.assertEqual(widget.is_market_closed(), expected_closed)
+
 
 if __name__ == "__main__":
-    status = is_market_closed()
-    print(f"Is market closed? {status}")
-    if not status:
-        print("PASS: Market is OPEN as expected for Friday.")
-    else:
-        print("FAIL: Market should be OPEN for Friday.")
+    unittest_main(verbosity=2)

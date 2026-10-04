@@ -16,6 +16,16 @@ import subprocess
 from datetime import datetime, timedelta
 from tkinter import messagebox, filedialog
 
+from theme import SPACING, THEME, configure_ttk_styles, font
+from ui_components import (
+    HoverButton,
+    IconButton,
+    ModernEntry,
+    SearchEntry,
+    SegmentedControl,
+    TransactionTable,
+)
+
 # Configuration
 GITHUB_REPO = "musabhc/gumus-altin-guncel-widget"
 
@@ -878,6 +888,8 @@ class UpdateManager:
             return False
 
 class PortfolioManagerDialog(tk.Toplevel):
+    ALL_ASSETS_LABEL = "Tüm Varlıklar"
+
     def __init__(self, parent, manager, on_save_callback, current_dollar_rate, instruments):
         super().__init__(parent)
         self.manager = manager
@@ -887,148 +899,339 @@ class PortfolioManagerDialog(tk.Toplevel):
         self.instrument_by_key = {item["key"]: item for item in self.instruments}
         self.instrument_label_to_key = {item["label"]: item["key"] for item in self.instruments}
         self.edit_index = None
-        self.bg_color = "#0b0f14"
-        self.color_card = "#141a21"
-        self.color_card_alt = "#10161d"
-        self.color_border = "#202936"
-        self.color_text_main = "#f8fafc"
-        self.color_text_dim = "#8a94a3"
-        self.color_text_muted = "#5d6675"
-        self.color_accent = "#3b82f6"
-        self.color_danger = "#ef4444"
+        self._form_scroll_after_id = None
+        self.bg_color = THEME["background"]
+        self.color_card = THEME["surface"]
+        self.color_card_alt = THEME["surface_alt"]
+        self.color_border = THEME["border"]
+        self.color_text_main = THEME["text_primary"]
+        self.color_text_dim = THEME["text_secondary"]
+        self.color_text_muted = THEME["text_muted"]
+        self.color_accent = THEME["primary"]
+        self.color_danger = THEME["negative"]
+        self.style_entry = {
+            "bg": THEME["input"],
+            "fg": THEME["text_primary"],
+            "insertbackground": THEME["text_primary"],
+            "relief": "flat",
+            "font": font(self, "body"),
+        }
+        self.style_label = {
+            "bg": THEME["surface"],
+            "fg": THEME["text_secondary"],
+            "font": font(self, "small"),
+        }
+
         self.title("Portföy Yönetimi")
-        self.geometry("860x520")
+        self.geometry("1120x760")
+        self.minsize(980, 700)
         self.configure(bg=self.bg_color)
-        
-        # --- Sol Panel: Liste ---
-        left_frame = tk.Frame(self, bg=self.bg_color, padx=12, pady=12)
-        left_frame.pack(side="left", fill="both", expand=True)
-        
-        tk.Label(left_frame, text="İşlem Geçmişi", bg=self.bg_color, fg=self.color_text_main, font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 10))
-        
-        # Treeview Stil
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("Portfolio.Treeview",
-                        background=self.color_card,
-                        foreground=self.color_text_main,
-                        fieldbackground=self.color_card,
-                        borderwidth=0,
-                        rowheight=25,
-                        font=("Segoe UI", 9))
-        
-        style.configure("Portfolio.Treeview.Heading",
-                        background=self.color_card_alt,
-                        foreground=self.color_text_main,
-                        relief="flat",
-                        font=("Segoe UI", 9, "bold"))
-                        
-        style.map("Portfolio.Treeview", background=[('selected', self.color_accent)])
-        
-        # Treeview
-        columns = ("date", "action", "asset", "amount", "total", "edit", "delete")
-        self.tree = ttk.Treeview(left_frame, columns=columns, show="headings", height=15, style="Portfolio.Treeview")
-        
-        self.tree.heading("date", text="Tarih")
-        self.tree.heading("action", text="İşlem")
-        self.tree.heading("asset", text="Varlık")
-        self.tree.heading("amount", text="Miktar")
-        self.tree.heading("total", text="Toplam")
-        self.tree.heading("edit", text="")
-        self.tree.heading("delete", text="")
-        
-        self.tree.column("date", width=90, anchor="center")
-        self.tree.column("action", width=70, anchor="center")
-        self.tree.column("asset", width=110, anchor="w")
-        self.tree.column("amount", width=90, anchor="center")
-        self.tree.column("total", width=110, anchor="center")
-        self.tree.column("edit", width=36, anchor="center")
-        self.tree.column("delete", width=40, anchor="center")
-        
-        self.tree.pack(side="left", fill="both", expand=True)
-        self.tree.bind("<ButtonRelease-1>", self.on_click)
-        
-        # Scrollbar
-        scrollbar = ttk.Scrollbar(left_frame, orient="vertical", command=self.tree.yview)
-        scrollbar.pack(side="right", fill="y")
-        self.tree.configure(yscrollcommand=scrollbar.set)
-        
-        # --- Sağ Panel: Ekleme ---
-        right_frame = tk.Frame(self, bg=self.color_card, padx=20, pady=20, highlightthickness=1, highlightbackground=self.color_border)
-        right_frame.pack(side="right", fill="y")
-        
+        configure_ttk_styles(self)
+
+        self.grid_rowconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        header = tk.Frame(self, bg=self.bg_color)
+        header.grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=SPACING["xl"],
+            pady=(SPACING["lg"], SPACING["md"]),
+        )
+        tk.Label(
+            header,
+            text="Portföy Yönetimi",
+            bg=self.bg_color,
+            fg=THEME["text_primary"],
+            font=font(self, "title", "bold"),
+            anchor="w",
+        ).pack(anchor="w")
+        tk.Label(
+            header,
+            text="Alım ve satış işlemlerinizi tek yerden görüntüleyin ve yönetin.",
+            bg=self.bg_color,
+            fg=THEME["text_secondary"],
+            font=font(self, "body"),
+            anchor="w",
+        ).pack(anchor="w", pady=(SPACING["xxs"], 0))
+
+        content = tk.Frame(self, bg=self.bg_color)
+        content.grid(
+            row=1,
+            column=0,
+            sticky="nsew",
+            padx=SPACING["xl"],
+            pady=(0, SPACING["xl"]),
+        )
+        content.grid_rowconfigure(0, weight=1)
+        content.grid_columnconfigure(0, weight=1, minsize=590)
+        content.grid_columnconfigure(1, weight=0, minsize=330)
+
+        # --- Sol kart: İşlem geçmişi ---
+        left_frame = tk.Frame(
+            content,
+            bg=self.color_card,
+            highlightthickness=1,
+            highlightbackground=self.color_border,
+        )
+        left_frame.grid(row=0, column=0, sticky="nsew", padx=(0, SPACING["sm"]))
+        left_frame.grid_rowconfigure(3, weight=1)
+        left_frame.grid_columnconfigure(0, weight=1)
+
+        history_header = tk.Frame(left_frame, bg=self.color_card)
+        history_header.grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=SPACING["lg"],
+            pady=(SPACING["lg"], SPACING["md"]),
+        )
+        tk.Label(
+            history_header,
+            text="İşlem Geçmişi",
+            bg=self.color_card,
+            fg=self.color_text_main,
+            font=font(self, "section", "bold"),
+            anchor="w",
+        ).pack(anchor="w")
+        tk.Label(
+            history_header,
+            text="Tüm alım-satım kayıtlarınızı arayın, düzenleyin veya silin.",
+            bg=self.color_card,
+            fg=self.color_text_dim,
+            font=font(self, "small"),
+            anchor="w",
+        ).pack(anchor="w", pady=(SPACING["xxs"], 0))
+
+        toolbar = tk.Frame(left_frame, bg=self.color_card)
+        toolbar.grid(
+            row=1,
+            column=0,
+            sticky="ew",
+            padx=SPACING["lg"],
+            pady=(0, SPACING["md"]),
+        )
+        toolbar.grid_columnconfigure(0, weight=1)
+        toolbar.grid_columnconfigure(1, minsize=180)
+
+        self.var_search = tk.StringVar(value="")
+        self.search_entry = SearchEntry(toolbar, self.var_search, placeholder="İşlem ara...")
+        self.search_entry.grid(row=0, column=0, sticky="ew", padx=(0, SPACING["sm"]))
+
+        self.var_asset_filter = tk.StringVar(value=self.ALL_ASSETS_LABEL)
+        self.combo_asset_filter = ttk.Combobox(
+            toolbar,
+            textvariable=self.var_asset_filter,
+            values=(self.ALL_ASSETS_LABEL,),
+            state="readonly",
+            style="Modern.TCombobox",
+            width=20,
+        )
+        self.combo_asset_filter.grid(row=0, column=1, sticky="ew")
+        self.combo_asset_filter.bind("<<ComboboxSelected>>", lambda _event: self.load_list())
+
+        table_border = tk.Frame(
+            left_frame,
+            bg=self.color_border,
+            padx=1,
+            pady=1,
+        )
+        table_border.grid(
+            row=3,
+            column=0,
+            sticky="nsew",
+            padx=SPACING["lg"],
+        )
+        table_border.grid_rowconfigure(0, weight=1)
+        table_border.grid_columnconfigure(0, weight=1)
+        self.tree = TransactionTable(table_border, self.start_edit, self.delete_transaction)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+
+        history_footer = tk.Frame(left_frame, bg=self.color_card)
+        history_footer.grid(
+            row=4,
+            column=0,
+            sticky="ew",
+            padx=SPACING["lg"],
+            pady=(SPACING["sm"], SPACING["md"]),
+        )
+        self.var_result_count = tk.StringVar(value="Toplam 0 işlem")
+        tk.Label(
+            history_footer,
+            textvariable=self.var_result_count,
+            bg=self.color_card,
+            fg=self.color_text_muted,
+            font=font(self, "small"),
+            anchor="w",
+        ).pack(side="left")
+
+        # --- Sağ kart: Yeni işlem / düzenleme formu ---
+        right_frame = tk.Frame(
+            content,
+            bg=self.color_card,
+            padx=SPACING["lg"],
+            pady=SPACING["lg"],
+            highlightthickness=1,
+            highlightbackground=self.color_border,
+        )
+        right_frame.grid(row=0, column=1, sticky="nsew")
+        right_frame.grid_columnconfigure(0, weight=1)
+        right_frame.grid_rowconfigure(2, weight=1)
+
         self.var_form_title = tk.StringVar(value="Yeni İşlem")
-        tk.Label(right_frame, textvariable=self.var_form_title, bg=self.color_card, fg=self.color_text_main, font=("Segoe UI", 14, "bold")).pack(anchor="w", pady=(0, 20))
-        
-        self.style_entry = {"bg": "#1b2430", "fg": self.color_text_main, "insertbackground": self.color_text_main, "relief": "flat", "font": ("Segoe UI", 10)}
-        self.style_label = {"bg": self.color_card, "fg": self.color_text_dim, "font": ("Segoe UI", 9)}
-        style_entry = self.style_entry
-        style_label = self.style_label
-        
+        tk.Label(
+            right_frame,
+            textvariable=self.var_form_title,
+            bg=self.color_card,
+            fg=self.color_text_main,
+            font=font(self, "section", "bold"),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew")
+        tk.Label(
+            right_frame,
+            text="Portföyünüze yeni bir alım veya satış işlemi ekleyin.",
+            bg=self.color_card,
+            fg=self.color_text_dim,
+            font=font(self, "small"),
+            justify="left",
+            wraplength=290,
+            anchor="w",
+        ).grid(row=1, column=0, sticky="ew", pady=(SPACING["xxs"], SPACING["md"]))
+
+        form_host = tk.Frame(right_frame, bg=self.color_card)
+        form_host.grid(row=2, column=0, sticky="nsew")
+        form_host.grid_rowconfigure(0, weight=1)
+        form_host.grid_columnconfigure(0, weight=1)
+        self.form_canvas = tk.Canvas(
+            form_host,
+            width=290,
+            height=1,
+            bg=self.color_card,
+            highlightthickness=0,
+            bd=0,
+        )
+        self.form_scrollbar = ttk.Scrollbar(
+            form_host,
+            orient="vertical",
+            command=self.form_canvas.yview,
+            style="Modern.Vertical.TScrollbar",
+        )
+        self.form_canvas.configure(yscrollcommand=self.form_scrollbar.set)
+        self.form_canvas.grid(row=0, column=0, sticky="nsew")
+        self.form_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.form_body = tk.Frame(self.form_canvas, bg=self.color_card)
+        form_body = self.form_body
+        self._form_window_id = self.form_canvas.create_window(
+            (0, 0), window=form_body, anchor="nw"
+        )
+        form_body.bind("<Configure>", self._sync_form_scrollregion)
+        self.form_canvas.bind("<Configure>", self._resize_form_canvas)
+        self.form_canvas.bind("<MouseWheel>", self._on_form_mousewheel)
+
+        def field_frame(label_text):
+            frame = tk.Frame(form_body, bg=self.color_card)
+            tk.Label(frame, text=label_text, **self.style_label).pack(anchor="w", pady=(0, SPACING["xxs"]))
+            return frame
+
         # 1. Tarih
-        tk.Label(right_frame, text="Tarih", **style_label).pack(anchor="w")
-        self.entry_date = tk.Entry(right_frame, **style_entry)
-        self.entry_date.pack(fill="x", ipady=5, pady=(2, 12))
+        date_field = field_frame("Tarih")
+        date_field.pack(fill="x", pady=(0, SPACING["sm"]))
+        self.entry_date = ModernEntry(date_field)
+        self.entry_date.pack(fill="x")
         self.entry_date.insert(0, datetime.now().strftime("%d-%m-%Y"))
 
         # 2. Varlık
-        tk.Label(right_frame, text="Varlık", **style_label).pack(anchor="w")
+        instrument_field = field_frame("Varlık")
+        instrument_field.pack(fill="x", pady=(0, SPACING["sm"]))
         default_label = self.instruments[0]["label"] if self.instruments else ""
         self.var_instrument = tk.StringVar(value=default_label)
-        self.combo_instrument = ttk.Combobox(right_frame, textvariable=self.var_instrument, values=[item["label"] for item in self.instruments], state="readonly")
-        self.combo_instrument.pack(fill="x", ipady=2, pady=(2, 12))
+        self.combo_instrument = ttk.Combobox(
+            instrument_field,
+            textvariable=self.var_instrument,
+            values=[item["label"] for item in self.instruments],
+            state="readonly",
+            style="Modern.TCombobox",
+        )
+        self.combo_instrument.pack(fill="x")
         self.combo_instrument.bind("<<ComboboxSelected>>", lambda e: self.update_amount_label())
 
         # 3. İşlem türü
-        tk.Label(right_frame, text="İşlem", **style_label).pack(anchor="w")
+        action_field = field_frame("İşlem")
+        action_field.pack(fill="x", pady=(0, SPACING["sm"]))
         self.var_action = tk.StringVar(value="buy")
-        frame_action = tk.Frame(right_frame, bg=self.color_card)
-        frame_action.pack(fill="x", pady=(2, 12))
-
-        tk.Radiobutton(frame_action, text="Alış", variable=self.var_action, value="buy", bg=self.color_card, fg=self.color_text_main, selectcolor="#1b2430", activebackground=self.color_card, activeforeground=self.color_text_main).pack(side="left", padx=(0, 10))
-        tk.Radiobutton(frame_action, text="Satış", variable=self.var_action, value="sell", bg=self.color_card, fg=self.color_text_main, selectcolor="#1b2430", activebackground=self.color_card, activeforeground=self.color_text_main).pack(side="left")
+        self.segment_action = SegmentedControl(
+            action_field,
+            self.var_action,
+            (("↑  Alış", "buy"), ("↓  Satış", "sell")),
+            selection_colors={
+                "buy": (THEME["positive_soft"], THEME["positive"]),
+                "sell": (THEME["negative_soft"], THEME["negative"]),
+            },
+        )
+        self.segment_action.pack(fill="x")
         
         # 4. Miktar
-        self.lbl_amount = tk.Label(right_frame, text="Miktar", **style_label)
-        self.lbl_amount.pack(anchor="w")
-        self.entry_amount = tk.Entry(right_frame, **style_entry)
-        self.entry_amount.pack(fill="x", ipady=5, pady=(2, 12))
+        amount_field = tk.Frame(form_body, bg=self.color_card)
+        amount_field.pack(fill="x", pady=(0, SPACING["sm"]))
+        self.lbl_amount = tk.Label(amount_field, text="Miktar", **self.style_label)
+        self.lbl_amount.pack(anchor="w", pady=(0, SPACING["xxs"]))
+        self.entry_amount = ModernEntry(amount_field)
+        self.entry_amount.pack(fill="x")
         
         # 5. Para Birimi
-        tk.Label(right_frame, text="Para Birimi", **style_label).pack(anchor="w")
+        currency_field = field_frame("Para Birimi")
+        currency_field.pack(fill="x", pady=(0, SPACING["sm"]))
         self.var_currency = tk.StringVar(value="TL")
-        frame_radio = tk.Frame(right_frame, bg=self.color_card)
-        frame_radio.pack(fill="x", pady=(2, 12))
-        
-        r1 = tk.Radiobutton(frame_radio, text="TL", variable=self.var_currency, value="TL", bg=self.color_card, fg=self.color_text_main, selectcolor="#1b2430", activebackground=self.color_card, activeforeground=self.color_text_main, command=self.toggle_rate_entry)
-        r1.pack(side="left", padx=(0, 10))
-        
-        r2 = tk.Radiobutton(frame_radio, text="USD", variable=self.var_currency, value="USD", bg=self.color_card, fg=self.color_text_main, selectcolor="#1b2430", activebackground=self.color_card, activeforeground=self.color_text_main, command=self.toggle_rate_entry)
-        r2.pack(side="left")
+        self.segment_currency = SegmentedControl(
+            currency_field,
+            self.var_currency,
+            (("₺  TL", "TL"), ("$  USD", "USD")),
+            command=self.toggle_rate_entry,
+        )
+        self.segment_currency.pack(fill="x")
         
         # 6. Kur (Sadece USD seçiliyse görünür)
-        self.frame_rate = tk.Frame(right_frame, bg=self.color_card)
-        self.frame_rate.pack(fill="x")
-        
-        tk.Label(self.frame_rate, text="İşlem Kuru (USD/TL)", **style_label).pack(anchor="w")
-        self.entry_rate = tk.Entry(self.frame_rate, **style_entry)
-        self.entry_rate.pack(fill="x", ipady=5, pady=(2, 12))
-        # Varsayılan olarak güncel kuru yazalım ama kullanıcı değiştirebilsin
+        self.frame_rate = field_frame("İşlem Kuru (USD/TL)")
+        self.frame_rate.pack(fill="x", pady=(0, SPACING["sm"]))
+        self.entry_rate = ModernEntry(self.frame_rate)
+        self.entry_rate.pack(fill="x")
         self.entry_rate.insert(0, f"{self.current_dollar_rate:.4f}")
         
         # 7. Toplam Tutar
-        tk.Label(right_frame, text="Toplam Tutar", **style_label).pack(anchor="w")
-        self.entry_total = tk.Entry(right_frame, **style_entry)
-        self.entry_total.pack(fill="x", ipady=5, pady=(2, 12))
+        self.total_field_frame = field_frame("Toplam Tutar")
+        self.total_field_frame.pack(fill="x", pady=(0, SPACING["sm"]))
+        self.entry_total = ModernEntry(self.total_field_frame)
+        self.entry_total.pack(fill="x")
         
         # Ekle/Güncelle Butonları
-        self.btn_save = tk.Button(right_frame, text="EKLE", bg=self.color_accent, fg="white", font=("Segoe UI", 10, "bold"), relief="flat", cursor="hand2", command=self.save)
-        self.btn_save.pack(fill="x", pady=(18, 8), ipady=8)
+        button_frame = tk.Frame(form_body, bg=self.color_card)
+        button_frame.pack(fill="x", pady=(SPACING["xs"], 0))
+        self.btn_save = HoverButton(
+            button_frame,
+            text="+  İşlemi Ekle",
+            command=self.save,
+            pady=10,
+        )
+        self.btn_save.pack(fill="x", pady=(0, SPACING["xs"]))
 
-        self.btn_cancel_edit = tk.Button(right_frame, text="DÜZENLEMEYİ İPTAL ET", bg=self.color_card_alt, fg=self.color_text_dim, font=("Segoe UI", 9, "bold"), relief="flat", cursor="hand2", command=self.cancel_edit)
-        
+        self.btn_cancel_edit = HoverButton(
+            button_frame,
+            text="Düzenlemeyi İptal Et",
+            command=self.cancel_edit,
+            bg=THEME["surface_alt"],
+            hover_bg=THEME["surface_hover"],
+            pressed_bg=THEME["surface_pressed"],
+            fg=THEME["text_secondary"],
+            pady=8,
+        )
+
         self.update_amount_label()
-        self.toggle_rate_entry() # İlk durum ayarı
+        self.toggle_rate_entry()
+        self._bind_form_mousewheel(self.form_body)
+        self._schedule_form_scroll_sync()
+        self.bind("<Destroy>", self._on_dialog_destroy, add="+")
+        self._search_trace_id = self.var_search.trace_add("write", self._on_search_changed)
         self.load_list()
 
     def selected_instrument(self):
@@ -1040,49 +1243,181 @@ class PortfolioManagerDialog(tk.Toplevel):
         unit = portfolio_unit(instrument or {})
         self.lbl_amount.config(text=f"Miktar ({unit})")
 
+    def _sync_form_scrollregion(self, _event=None):
+        try:
+            if not self.form_canvas.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        self.form_canvas.configure(scrollregion=self.form_canvas.bbox("all"))
+        needs_scroll = self.form_body.winfo_reqheight() > self.form_canvas.winfo_height()
+        if needs_scroll:
+            self.form_scrollbar.grid()
+        else:
+            self.form_scrollbar.grid_remove()
+            self.form_canvas.yview_moveto(0)
+
+    def _run_form_scroll_sync(self):
+        self._form_scroll_after_id = None
+        self._sync_form_scrollregion()
+
+    def _schedule_form_scroll_sync(self):
+        if not self.winfo_exists():
+            return
+        if self._form_scroll_after_id is not None:
+            try:
+                self.after_cancel(self._form_scroll_after_id)
+            except (tk.TclError, ValueError):
+                pass
+        self._form_scroll_after_id = self.after_idle(self._run_form_scroll_sync)
+
+    def _on_dialog_destroy(self, event):
+        if event.widget is not self or self._form_scroll_after_id is None:
+            return
+        try:
+            self.after_cancel(self._form_scroll_after_id)
+        except (tk.TclError, ValueError):
+            pass
+        self._form_scroll_after_id = None
+
+    def _resize_form_canvas(self, event):
+        self.form_canvas.itemconfigure(self._form_window_id, width=event.width)
+        self._schedule_form_scroll_sync()
+
+    def _on_form_mousewheel(self, event):
+        if self.form_scrollbar.winfo_ismapped():
+            self.form_canvas.yview_scroll(-3 if event.delta > 0 else 3, "units")
+            return "break"
+        return None
+
+    def _bind_form_mousewheel(self, widget):
+        widget.bind("<MouseWheel>", self._on_form_mousewheel, add="+")
+        for child in widget.winfo_children():
+            self._bind_form_mousewheel(child)
+
     def toggle_rate_entry(self):
         if self.var_currency.get() == "USD":
-            self.frame_rate.pack(fill="x", before=self.entry_total) # Tekrar göster
+            self.frame_rate.pack(
+                fill="x",
+                before=self.total_field_frame,
+                pady=(0, SPACING["sm"]),
+            )
         else:
             self.frame_rate.pack_forget()
+        self._schedule_form_scroll_sync()
+
+    def _on_search_changed(self, *_args):
+        self.load_list()
+
+    def _transaction_row(self, source_index, raw_transaction):
+        transaction = self.manager.normalize_transaction(raw_transaction)
+        instrument = self.instrument_by_key.get(transaction["instrument_key"])
+        label = (
+            instrument["label"]
+            if instrument
+            else transaction.get("instrument_label", transaction["instrument_key"])
+        )
+        unit = portfolio_unit(instrument or {})
+        action_text = "Alış" if transaction["action"] == "buy" else "Satış"
+        quantity_text = f"{transaction['quantity']:.2f} {unit}"
+        if transaction["currency"] == "USD":
+            total_text = f"${transaction['total_usd']:.2f}"
+            raw_total = transaction["total_usd"]
+        else:
+            total_text = f"₺{transaction['total_tl']:.2f}"
+            raw_total = transaction["total_tl"]
+
+        raw_quantity_text = f"{transaction['quantity']:.8f}".rstrip("0").rstrip(".")
+        raw_total_text = f"{raw_total:.8f}".rstrip("0").rstrip(".")
+        searchable = " ".join((
+            str(transaction["date"]),
+            action_text,
+            transaction["action"],
+            str(label),
+            quantity_text,
+            raw_quantity_text,
+            total_text,
+            raw_total_text,
+        )).casefold()
+
+        return {
+            "source_index": source_index,
+            "date": str(transaction["date"]),
+            "action": action_text,
+            "action_key": transaction["action"],
+            "asset": str(label),
+            "amount": quantity_text,
+            "total": total_text,
+            "searchable": searchable,
+        }
+
+    def _refresh_asset_filter_values(self):
+        labels = []
+        seen = set()
+
+        for instrument in self.instruments:
+            label = str(instrument.get("label", instrument.get("key", ""))).strip()
+            if label and label not in seen:
+                seen.add(label)
+                labels.append(label)
+
+        for index, raw_transaction in enumerate(self.manager.transactions):
+            label = self._transaction_row(index, raw_transaction)["asset"]
+            if label and label not in seen:
+                seen.add(label)
+                labels.append(label)
+
+        values = (self.ALL_ASSETS_LABEL, *labels)
+        self.combo_asset_filter.configure(values=values)
+        if self.var_asset_filter.get() not in values:
+            self.var_asset_filter.set(self.ALL_ASSETS_LABEL)
+
+    def _filtered_transaction_rows(self):
+        query = self.var_search.get().strip().casefold()
+        normalized_query = query.replace(",", ".")
+        selected_asset = self.var_asset_filter.get()
+        rows = []
+
+        for source_index, raw_transaction in enumerate(self.manager.transactions):
+            row = self._transaction_row(source_index, raw_transaction)
+            if selected_asset != self.ALL_ASSETS_LABEL and row["asset"] != selected_asset:
+                continue
+            if query:
+                searchable = row["searchable"]
+                normalized_searchable = searchable.replace(",", ".")
+                if query not in searchable and normalized_query not in normalized_searchable:
+                    continue
+            rows.append(row)
+        return rows
 
     def load_list(self):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-            
-        for i, t in enumerate(self.manager.transactions):
-            transaction = self.manager.normalize_transaction(t)
-            instrument = self.instrument_by_key.get(transaction["instrument_key"])
-            label = instrument["label"] if instrument else transaction.get("instrument_label", transaction["instrument_key"])
-            unit = portfolio_unit(instrument or {})
-            action_text = "Alış" if transaction["action"] == "buy" else "Satış"
-            if transaction["currency"] == "USD":
-                total_str = f"${transaction['total_usd']:.2f}"
-            else:
-                total_str = f"₺{transaction['total_tl']:.2f}"
-                
-            self.tree.insert("", "end", iid=i, values=(
-                transaction["date"],
-                action_text,
-                label,
-                f"{transaction['quantity']:.2f} {unit}",
-                total_str,
-                "✎",
-                "🗑️",
-            ))
+        self._refresh_asset_filter_values()
+        rows = self._filtered_transaction_rows()
+        self.tree.set_rows(rows)
+
+        total = len(self.manager.transactions)
+        filters_active = bool(self.var_search.get().strip()) or (
+            self.var_asset_filter.get() != self.ALL_ASSETS_LABEL
+        )
+        if filters_active:
+            self.var_result_count.set(f"{len(rows)} / {total} işlem")
+        else:
+            self.var_result_count.set(f"Toplam {total} işlem")
 
     def on_click(self, event):
-        region = self.tree.identify("region", event.x, event.y)
-        if region == "cell":
-            column = self.tree.identify_column(event.x)
-            if column == "#6": # Edit column
-                item_id = self.tree.identify_row(event.y)
-                if item_id:
-                    self.start_edit(item_id)
-            elif column == "#7": # Delete column
-                item_id = self.tree.identify_row(event.y)
-                if item_id:
-                    self.delete_transaction(item_id)
+        """Compatibility dispatcher for callers that provide row metadata.
+
+        ``TransactionTable`` binds its edit/delete buttons directly, but this
+        method remains available for the dialog's historical callback API.
+        """
+        item_id = getattr(event, "source_index", None)
+        action = getattr(event, "action", None)
+        if item_id is None:
+            return
+        if action == "edit":
+            self.start_edit(str(item_id))
+        elif action == "delete":
+            self.delete_transaction(str(item_id))
 
     def start_edit(self, item_id):
         idx = int(item_id)
@@ -1111,14 +1446,14 @@ class PortfolioManagerDialog(tk.Toplevel):
 
         self.edit_index = idx
         self.var_form_title.set("İşlemi Düzenle")
-        self.btn_save.config(text="GÜNCELLE")
+        self.btn_save.config(text="Değişiklikleri Kaydet")
         if not self.btn_cancel_edit.winfo_ismapped():
-            self.btn_cancel_edit.pack(fill="x", pady=(0, 8), ipady=6)
+            self.btn_cancel_edit.pack(fill="x")
 
     def cancel_edit(self):
         self.edit_index = None
         self.var_form_title.set("Yeni İşlem")
-        self.btn_save.config(text="EKLE")
+        self.btn_save.config(text="+  İşlemi Ekle")
         self.btn_cancel_edit.pack_forget()
         self.clear_form()
 
@@ -1193,7 +1528,7 @@ class PortfolioManagerDialog(tk.Toplevel):
                 self.manager.replace(self.edit_index, data)
                 self.edit_index = None
                 self.var_form_title.set("Yeni İşlem")
-                self.btn_save.config(text="EKLE")
+                self.btn_save.config(text="+  İşlemi Ekle")
                 self.btn_cancel_edit.pack_forget()
             self.load_list()
             self.on_save_callback()
@@ -1213,74 +1548,182 @@ class WatchlistDialog(tk.Toplevel):
         self.on_change_callback = on_change_callback
         self.price_validator = price_validator
         self.title("İzlenenler")
-        self.geometry("680x420")
-        self.configure(bg="#2d2d2d")
+        self.geometry("780x560")
+        self.minsize(700, 520)
+        self.configure(bg=THEME["background"])
+        configure_ttk_styles(self)
+        self.grid_rowconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=1)
 
-        left_frame = tk.Frame(self, bg="#2d2d2d", padx=10, pady=10)
-        left_frame.pack(side="left", fill="both", expand=True)
+        header = tk.Frame(self, bg=THEME["background"])
+        header.grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=SPACING["xl"],
+            pady=(SPACING["lg"], SPACING["md"]),
+        )
+        tk.Label(
+            header,
+            text="İzlenen Varlıklar",
+            bg=THEME["background"],
+            fg=THEME["text_primary"],
+            font=font(self, "title", "bold"),
+            anchor="w",
+        ).pack(anchor="w")
+        tk.Label(
+            header,
+            text="Widget'ta gösterilecek piyasa sembollerini yönetin.",
+            bg=THEME["background"],
+            fg=THEME["text_secondary"],
+            font=font(self, "body"),
+            anchor="w",
+        ).pack(anchor="w", pady=(SPACING["xxs"], 0))
 
-        tk.Label(left_frame, text="İzleme Listesi", bg="#2d2d2d", fg="#cccccc", font=("Segoe UI", 12, "bold")).pack(anchor="w", pady=(0, 10))
+        content = tk.Frame(self, bg=THEME["background"])
+        content.grid(
+            row=1,
+            column=0,
+            sticky="nsew",
+            padx=SPACING["xl"],
+            pady=(0, SPACING["xl"]),
+        )
+        content.grid_rowconfigure(0, weight=1)
+        content.grid_columnconfigure(0, weight=1, minsize=410)
+        content.grid_columnconfigure(1, weight=0, minsize=260)
 
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("Watchlist.Treeview",
-                        background="#3d3d3d",
-                        foreground="white",
-                        fieldbackground="#3d3d3d",
-                        borderwidth=0,
-                        rowheight=25,
-                        font=("Segoe UI", 9))
-        style.configure("Watchlist.Treeview.Heading",
-                        background="#252526",
-                        foreground="white",
-                        relief="flat",
-                        font=("Segoe UI", 9, "bold"))
-        style.map("Watchlist.Treeview", background=[('selected', '#007acc')])
+        left_frame = tk.Frame(
+            content,
+            bg=THEME["surface"],
+            padx=SPACING["md"],
+            pady=SPACING["md"],
+            highlightthickness=1,
+            highlightbackground=THEME["border"],
+        )
+        left_frame.grid(row=0, column=0, sticky="nsew", padx=(0, SPACING["sm"]))
+        left_frame.grid_rowconfigure(1, weight=1)
+        left_frame.grid_columnconfigure(0, weight=1)
+
+        tk.Label(
+            left_frame,
+            text="İzleme Listesi",
+            bg=THEME["surface"],
+            fg=THEME["text_primary"],
+            font=font(self, "section", "bold"),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="ew", pady=(0, SPACING["sm"]))
+
+        table_frame = tk.Frame(left_frame, bg=THEME["border"], padx=1, pady=1)
+        table_frame.grid(row=1, column=0, sticky="nsew")
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
 
         columns = ("label", "symbol", "currency", "delete")
-        self.tree = ttk.Treeview(left_frame, columns=columns, show="headings", height=13, style="Watchlist.Treeview")
+        self.tree = ttk.Treeview(
+            table_frame,
+            columns=columns,
+            show="headings",
+            height=13,
+            style="Modern.Treeview",
+        )
         self.tree.heading("label", text="Ad")
         self.tree.heading("symbol", text="Yahoo Sembolü")
         self.tree.heading("currency", text="Birim")
         self.tree.heading("delete", text="")
-        self.tree.column("label", width=130, anchor="w")
-        self.tree.column("symbol", width=110, anchor="center")
-        self.tree.column("currency", width=60, anchor="center")
-        self.tree.column("delete", width=40, anchor="center")
-        self.tree.pack(side="left", fill="both", expand=True)
+        self.tree.column("label", width=150, minwidth=100, anchor="w")
+        self.tree.column("symbol", width=120, minwidth=90, anchor="center")
+        self.tree.column("currency", width=60, minwidth=50, anchor="center", stretch=False)
+        self.tree.column("delete", width=52, minwidth=48, anchor="center", stretch=False)
+        self.tree.grid(row=0, column=0, sticky="nsew")
         self.tree.bind("<ButtonRelease-1>", self.on_click)
 
-        scrollbar = ttk.Scrollbar(left_frame, orient="vertical", command=self.tree.yview)
-        scrollbar.pack(side="right", fill="y")
+        scrollbar = ttk.Scrollbar(
+            table_frame,
+            orient="vertical",
+            command=self.tree.yview,
+            style="Modern.Vertical.TScrollbar",
+        )
+        scrollbar.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=scrollbar.set)
 
-        right_frame = tk.Frame(self, bg="#333333", padx=20, pady=20)
-        right_frame.pack(side="right", fill="y")
+        right_frame = tk.Frame(
+            content,
+            bg=THEME["surface"],
+            padx=SPACING["lg"],
+            pady=SPACING["lg"],
+            highlightthickness=1,
+            highlightbackground=THEME["border"],
+        )
+        right_frame.grid(row=0, column=1, sticky="nsew")
 
-        tk.Label(right_frame, text="Yeni Varlık", bg="#333333", fg="white", font=("Segoe UI", 14, "bold")).pack(anchor="w", pady=(0, 16))
+        tk.Label(
+            right_frame,
+            text="Yeni Varlık",
+            bg=THEME["surface"],
+            fg=THEME["text_primary"],
+            font=font(self, "section", "bold"),
+        ).pack(anchor="w")
+        tk.Label(
+            right_frame,
+            text="Geçerli bir Yahoo Finance sembolü ekleyin.",
+            bg=THEME["surface"],
+            fg=THEME["text_secondary"],
+            font=font(self, "small"),
+            wraplength=220,
+            justify="left",
+        ).pack(anchor="w", pady=(SPACING["xxs"], SPACING["md"]))
 
-        style_entry = {"bg": "#454545", "fg": "white", "insertbackground": "white", "relief": "flat", "font": ("Segoe UI", 10)}
-        style_label = {"bg": "#333333", "fg": "#cccccc", "font": ("Segoe UI", 9)}
+        field_label = {
+            "bg": THEME["surface"],
+            "fg": THEME["text_secondary"],
+            "font": font(self, "small"),
+        }
 
-        tk.Label(right_frame, text="Görünen Ad", **style_label).pack(anchor="w")
-        self.entry_label = tk.Entry(right_frame, **style_entry)
-        self.entry_label.pack(fill="x", ipady=5, pady=(2, 12))
+        tk.Label(right_frame, text="Görünen Ad", **field_label).pack(anchor="w")
+        self.entry_label = ModernEntry(right_frame)
+        self.entry_label.pack(fill="x", pady=(SPACING["xxs"], SPACING["sm"]))
 
-        tk.Label(right_frame, text="Yahoo Sembolü", **style_label).pack(anchor="w")
-        self.entry_symbol = tk.Entry(right_frame, **style_entry)
-        self.entry_symbol.pack(fill="x", ipady=5, pady=(2, 5))
-        tk.Label(right_frame, text="Örnek: THYAO.IS, AAPL, BTC-USD", bg="#333333", fg="#888888", font=("Segoe UI", 8)).pack(anchor="w", pady=(0, 12))
+        tk.Label(right_frame, text="Yahoo Sembolü", **field_label).pack(anchor="w")
+        self.entry_symbol = ModernEntry(right_frame)
+        self.entry_symbol.pack(fill="x", pady=(SPACING["xxs"], SPACING["xxs"]))
+        tk.Label(
+            right_frame,
+            text="Örnek: THYAO.IS, AAPL, BTC-USD",
+            bg=THEME["surface"],
+            fg=THEME["text_muted"],
+            font=font(self, "caption"),
+        ).pack(anchor="w", pady=(0, SPACING["sm"]))
 
-        tk.Label(right_frame, text="Para Birimi", **style_label).pack(anchor="w")
+        tk.Label(right_frame, text="Para Birimi", **field_label).pack(anchor="w")
         self.var_currency = tk.StringVar(value="₺")
-        self.combo_currency = ttk.Combobox(right_frame, textvariable=self.var_currency, values=["₺", "$", "€", ""], width=10)
-        self.combo_currency.pack(fill="x", ipady=2, pady=(2, 12))
+        self.combo_currency = ttk.Combobox(
+            right_frame,
+            textvariable=self.var_currency,
+            values=["₺", "$", "€", ""],
+            state="readonly",
+            style="Modern.TCombobox",
+        )
+        self.combo_currency.pack(fill="x", pady=(SPACING["xxs"], SPACING["sm"]))
 
         self.var_status = tk.StringVar(value="")
-        tk.Label(right_frame, textvariable=self.var_status, bg="#333333", fg="#aaaaaa", font=("Segoe UI", 8), wraplength=190, justify="left").pack(fill="x", pady=(0, 8))
+        tk.Label(
+            right_frame,
+            textvariable=self.var_status,
+            bg=THEME["surface"],
+            fg=THEME["text_secondary"],
+            font=font(self, "small"),
+            wraplength=220,
+            justify="left",
+            anchor="w",
+        ).pack(fill="x", pady=(0, SPACING["xs"]))
 
-        self.btn_add = tk.Button(right_frame, text="EKLE", bg="#007acc", fg="white", font=("Segoe UI", 10, "bold"), relief="flat", cursor="hand2", command=self.add_symbol)
-        self.btn_add.pack(fill="x", pady=10, ipady=8)
+        self.btn_add = HoverButton(
+            right_frame,
+            text="+  Varlık Ekle",
+            command=self.add_symbol,
+            pady=10,
+        )
+        self.btn_add.pack(fill="x")
 
         self.load_list()
 
@@ -1292,7 +1735,7 @@ class WatchlistDialog(tk.Toplevel):
                 instrument["label"],
                 instrument["symbol"],
                 instrument.get("currency", ""),
-                "🗑️",
+                "Sil",
             ))
 
     def on_click(self, event):
@@ -1396,7 +1839,9 @@ class PiyasaWidget:
         
         # Başlangıç Konumu (Sağ Üst)
         screen_width = self.root.winfo_screenwidth()
-        self.root.geometry(f"320x420+{screen_width-350}+50")
+        screen_height = self.root.winfo_screenheight()
+        initial_height = min(520, max(420, screen_height - 100))
+        self.root.geometry(f"320x{initial_height}+{screen_width-350}+50")
         
         # Managers
         self.tm = TransactionManager()
@@ -1467,14 +1912,39 @@ class PiyasaWidget:
         self.update_thread.start()
         
     def setup_ui(self):
-        # --- Modern widget stil tanımları (dinamik fontlar) ---
+        """Build the compact desktop widget without changing its state contract."""
+        configure_ttk_styles(self.root)
+
+        # Shared theme tokens are mirrored onto the legacy attributes used by
+        # the existing render/update callbacks.
+        self.bg_color = THEME["background"]
+        self.color_card = THEME["surface"]
+        self.color_card_alt = THEME["surface_alt"]
+        self.color_border = THEME["border"]
+        self.color_text_main = THEME["text_primary"]
+        self.color_text_dim = THEME["text_secondary"]
+        self.color_text_muted = THEME["text_muted"]
+        self.color_accent = THEME["primary"]
+        self.color_success = THEME["positive"]
+        self.color_danger = THEME["negative"]
+        self.color_gold = THEME["gold"]
+        self.color_success_bg = THEME["positive_soft"]
+        self.color_danger_bg = THEME["negative_soft"]
+        self.root.configure(bg=self.bg_color)
+
+        # Dynamic fonts are retained because resize handling updates these
+        # exact tkfont.Font instances in-place.
         self.base_fonts = {
             "header": 9,
             "label": 9,
             "value": 11,
-            "portfolio": 24,
+            "portfolio": 25,
             "profit": 9,
-            "market_status": 13,
+            "market_status": 14,
+            "nav_arrow": 13,
+            "icon": 10,
+            "small": 8,
+            "badge": 8,
             "chart_text": 10,
             "chart_title": 8,
             "chart_tick": 6,
@@ -1482,95 +1952,114 @@ class PiyasaWidget:
             "stats_title": 8,
             "stats_val": 7
         }
-        
-        self.font_header = tkfont.Font(family="Segoe UI", size=self.base_fonts["header"])
-        self.font_label = tkfont.Font(family="Segoe UI Semibold", size=self.base_fonts["label"])
-        self.font_value = tkfont.Font(family="Segoe UI", size=self.base_fonts["value"])
-        self.font_portfolio = tkfont.Font(family="Segoe UI", size=self.base_fonts["portfolio"], weight="bold")
-        self.font_profit = tkfont.Font(family="Segoe UI Semibold", size=self.base_fonts["profit"])
-        
-        # Diğer arayüz elemanları için ek fontlar
-        self.font_market_status = tkfont.Font(family="Arial", size=self.base_fonts["market_status"])
-        self.font_nav_arrow = tkfont.Font(family="Segoe UI", size=9)
-        self.font_icon = tkfont.Font(family="Segoe UI Emoji", size=10)
-        self.font_small = tkfont.Font(family="Segoe UI", size=8)
-        self.font_badge = tkfont.Font(family="Segoe UI Semibold", size=8)
+
+        font_family = font(self.root, "body")[0]
+        self.font_family = font_family
+        self.font_header = tkfont.Font(family=font_family, size=self.base_fonts["header"])
+        self.font_label = tkfont.Font(family=font_family, size=self.base_fonts["label"], weight="bold")
+        self.font_value = tkfont.Font(family=font_family, size=self.base_fonts["value"], weight="bold")
+        self.font_portfolio = tkfont.Font(family=font_family, size=self.base_fonts["portfolio"], weight="bold")
+        self.font_profit = tkfont.Font(family=font_family, size=self.base_fonts["profit"], weight="bold")
+        self.font_market_status = tkfont.Font(family=font_family, size=self.base_fonts["market_status"], weight="bold")
+        self.font_nav_arrow = tkfont.Font(family=font_family, size=13)
+        self.font_icon = tkfont.Font(family=font_family, size=10)
+        self.font_small = tkfont.Font(family=font_family, size=8)
+        self.font_badge = tkfont.Font(family=font_family, size=8, weight="bold")
         
         # Responsive tasarım için takip
         self.last_width = 320
         self._resize_after_id = None  # Debounce timer
         self.root.bind("<Configure>", self.on_resize)
         
-        # Renk paleti (mockup'taki koyu finans widget hissi)
-        self.bg_color = "#0b0f14"
-        self.root.configure(bg=self.bg_color)
-        
-        self.color_card = "#141a21"
-        self.color_card_alt = "#10161d"
-        self.color_border = "#202936"
-        self.color_text_main = "#f8fafc"
-        self.color_text_dim = "#8a94a3"
-        self.color_text_muted = "#5d6675"
-        self.color_accent = "#3b82f6"
-        self.color_success = "#22c55e"
-        self.color_danger = "#ef4444"
-        self.color_gold = "#f4c542"
-        self.color_success_bg = "#10261a"
-        self.color_danger_bg = "#2a1214"
-        
         # Ana Konteyner
-        self.frame = tk.Frame(self.root, bg=self.bg_color, padx=12, pady=12)
+        self.frame = tk.Frame(
+            self.root,
+            bg=self.bg_color,
+            padx=SPACING["sm"],
+            pady=SPACING["sm"],
+        )
         self.frame.pack(fill="both", expand=True)
         
         # 1. ÜST HEADER (durum + saat + sayfa navigasyonu)
         header_frame = tk.Frame(self.frame, bg=self.bg_color)
-        header_frame.pack(fill="x", pady=(0, 10))
+        header_frame.pack(fill="x", pady=(0, SPACING["xs"]))
         
         status_frame = tk.Frame(header_frame, bg=self.bg_color)
         status_frame.pack(side="left", fill="x", expand=True)
 
         self.var_market_status = tk.StringVar(value="•")
-        self.lbl_market_status = tk.Label(status_frame, textvariable=self.var_market_status, bg=self.bg_color, fg=self.color_text_dim, font=self.font_market_status, anchor="w")
-        self.lbl_market_status.pack(side="left", padx=(0, 5))
+        self.lbl_market_status = tk.Label(
+            status_frame,
+            textvariable=self.var_market_status,
+            bg=self.bg_color,
+            fg=self.color_text_dim,
+            font=self.font_market_status,
+            anchor="w",
+        )
+        self.lbl_market_status.pack(side="left", padx=(0, SPACING["xxs"]))
 
         self.var_market_label = tk.StringVar(value="Piyasa bekleniyor")
-        tk.Label(status_frame, textvariable=self.var_market_label, bg=self.bg_color, fg=self.color_text_dim, font=self.font_header, anchor="w").pack(side="left")
+        self.lbl_market_label = tk.Label(
+            status_frame,
+            textvariable=self.var_market_label,
+            bg=self.bg_color,
+            fg=self.color_text_dim,
+            font=self.font_header,
+            anchor="w",
+        )
+        self.lbl_market_label.pack(side="left")
         
         # Navigasyon çerçevesi
         nav_frame = tk.Frame(header_frame, bg=self.bg_color)
         nav_frame.pack(side="right")
         
-        self.btn_prev = tk.Label(nav_frame, text="◀", bg=self.bg_color, fg="#333333", font=self.font_nav_arrow, cursor="hand2")
-        self.btn_prev.pack(side="left", padx=(0, 4))
+        self.btn_prev = tk.Label(nav_frame, text="‹", bg=self.bg_color, fg=self.color_text_muted, font=self.font_nav_arrow, cursor="hand2")
+        self.btn_prev.pack(side="left", padx=(0, SPACING["xxs"]))
         self.btn_prev.bind("<Button-1>", lambda e: self.prev_page())
-        self.btn_prev.bind("<Enter>", lambda e: self.btn_prev.config(fg="#888888"))
+        self.btn_prev.bind("<Enter>", lambda e: self.btn_prev.config(fg=self.color_text_main))
         self.btn_prev.bind("<Leave>", lambda e: self._update_arrow_colors())
         
         self.var_time = tk.StringVar(value="--:--")
-        tk.Label(nav_frame, textvariable=self.var_time, bg=self.bg_color, fg=self.color_text_dim, font=self.font_header, anchor="center").pack(side="left")
+        self.lbl_time = tk.Label(nav_frame, textvariable=self.var_time, bg=self.bg_color, fg=self.color_text_dim, font=self.font_header, anchor="center")
+        self.lbl_time.pack(side="left")
         
-        self.btn_next = tk.Label(nav_frame, text="▶", bg=self.bg_color, fg="#333333", font=self.font_nav_arrow, cursor="hand2")
-        self.btn_next.pack(side="left", padx=(4, 0))
+        self.btn_next = tk.Label(nav_frame, text="›", bg=self.bg_color, fg=self.color_text_muted, font=self.font_nav_arrow, cursor="hand2")
+        self.btn_next.pack(side="left", padx=(SPACING["xxs"], 0))
         self.btn_next.bind("<Button-1>", lambda e: self.next_page())
-        self.btn_next.bind("<Enter>", lambda e: self.btn_next.config(fg="#888888"))
+        self.btn_next.bind("<Enter>", lambda e: self.btn_next.config(fg=self.color_text_main))
         self.btn_next.bind("<Leave>", lambda e: self._update_arrow_colors())
 
         # 4. FOOTER (kompakt araç çubuğu) - footer önce pack edilir (side=bottom)
-        footer_frame = tk.Frame(self.frame, bg=self.color_card_alt, padx=8, pady=6, highlightthickness=1, highlightbackground=self.color_border)
-        footer_frame.pack(side="bottom", fill="x", pady=(10, 0))
-        
-        def create_icon_btn(parent, text, command):
-            lbl = tk.Label(parent, text=text, bg=self.color_card_alt, fg=self.color_text_muted, font=self.font_icon, cursor="hand2", width=2)
-            lbl.pack(side="right", padx=(8, 0))
-            lbl.bind("<Button-1>", lambda e: command())
-            lbl.bind("<Enter>", lambda e: lbl.config(fg=self.color_text_main))
-            lbl.bind("<Leave>", lambda e: lbl.config(fg=self.color_text_muted))
-            return lbl
+        footer_frame = tk.Frame(
+            self.frame,
+            bg=self.color_card,
+            padx=SPACING["xs"],
+            pady=SPACING["xxs"],
+            highlightthickness=1,
+            highlightbackground=self.color_border,
+        )
+        footer_frame.pack(side="bottom", fill="x", pady=(SPACING["xs"], 0))
 
-        create_icon_btn(footer_frame, "⚙️", self.open_settings)
-        create_icon_btn(footer_frame, "📥", self.import_transactions)
-        create_icon_btn(footer_frame, "➕", self.open_add_transaction)
-        create_icon_btn(footer_frame, "🔄", self.request_data_refresh)
+        self.footer_buttons = {}
+        for key, icon_name, callback in (
+            ("settings", "settings", self.open_settings),
+            ("import", "import", self.import_transactions),
+            ("add", "plus", self.open_add_transaction),
+            ("refresh", "refresh", self.request_data_refresh),
+        ):
+            button = IconButton(
+                footer_frame,
+                icon_name,
+                callback,
+                size=28,
+                bg=self.color_card,
+                hover_bg=THEME["surface_hover"],
+                fg=self.color_text_muted,
+                hover_fg=self.color_text_main,
+                show_border=False,
+            )
+            button.pack(side="right", padx=(SPACING["xs"], 0))
+            self.footer_buttons[key] = button
 
         # 2. İÇERİK KONTEYNERİ (Sayfa bazlı geçiş)
         self.content_container = tk.Frame(self.frame, bg=self.bg_color)
@@ -1579,20 +2068,27 @@ class PiyasaWidget:
         # --- Sayfa 0: Ana Sayfa ---
         self.page_main = tk.Frame(self.content_container, bg=self.bg_color)
         
-        portfolio_frame = tk.Frame(self.page_main, bg=self.color_card, padx=12, pady=12, highlightthickness=1, highlightbackground=self.color_border)
-        portfolio_frame.pack(fill="x", pady=(0, 12))
+        portfolio_frame = tk.Frame(
+            self.page_main,
+            bg=self.color_card,
+            padx=SPACING["sm"],
+            pady=SPACING["sm"],
+            highlightthickness=1,
+            highlightbackground=self.color_border,
+        )
+        portfolio_frame.pack(fill="x", pady=(0, SPACING["sm"]))
         
         tk.Label(portfolio_frame, text="TOPLAM VARLIK", bg=self.color_card, fg=self.color_text_dim, font=self.font_header, anchor="w").pack(fill="x")
         
         self.var_portfolio = tk.StringVar(value="₺...")
-        tk.Label(portfolio_frame, textvariable=self.var_portfolio, bg=self.color_card, fg=self.color_text_main, font=self.font_portfolio, anchor="w").pack(fill="x", pady=(2, 4))
+        tk.Label(portfolio_frame, textvariable=self.var_portfolio, bg=self.color_card, fg=self.color_text_main, font=self.font_portfolio, anchor="w").pack(fill="x", pady=(SPACING["xxs"], SPACING["xs"]))
         
         self.var_profit = tk.StringVar(value="...")
-        self.lbl_profit = tk.Label(portfolio_frame, textvariable=self.var_profit, bg=self.color_card_alt, fg=self.color_text_dim, font=self.font_profit, anchor="w", padx=7, pady=2)
+        self.lbl_profit = tk.Label(portfolio_frame, textvariable=self.var_profit, bg=THEME["surface_hover"], fg=self.color_text_dim, font=self.font_profit, anchor="w", padx=SPACING["xs"], pady=SPACING["xxs"])
         self.lbl_profit.pack(anchor="w")
 
         self.portfolio_breakdown_frame = tk.Frame(portfolio_frame, bg=self.color_card)
-        self.portfolio_breakdown_frame.pack(fill="x", pady=(10, 0))
+        self.portfolio_breakdown_frame.pack(fill="x", pady=(SPACING["xs"], 0))
 
         self.price_rows_frame = tk.Frame(self.page_main, bg=self.bg_color)
         self.price_rows_frame.pack(fill="x")
@@ -1616,26 +2112,59 @@ class PiyasaWidget:
         self.show_page(0)
 
         # --- Yeniden Boyutlandırma (Resize Grip) ---
-        self.grip = tk.Label(self.root, text="◢", bg=self.bg_color, fg="#333333", font=("Arial", 8), cursor="sizing")
+        self.grip = tk.Label(self.root, text="◢", bg=self.bg_color, fg=self.color_border, font=(font_family, 8), cursor="sizing")
         self.grip.place(relx=1.0, rely=1.0, anchor="se")
         self.grip.bind("<ButtonPress-1>", self.start_resize)
         self.grip.bind("<B1-Motion>", self.do_resize)
         self.grip.bind("<ButtonRelease-1>", self._on_resize_end)
-        self.grip.bind("<Enter>", lambda e: self.grip.config(fg="#666666"))
-        self.grip.bind("<Leave>", lambda e: self.grip.config(fg="#333333"))
+        self.grip.bind("<Enter>", lambda e: self.grip.config(fg=self.color_text_muted))
+        self.grip.bind("<Leave>", lambda e: self.grip.config(fg=self.color_border))
+
+    def _draw_asset_icon(self, canvas, instrument):
+        """Draw a small dependency-free asset mark on a market row."""
+        canvas.delete("all")
+        color = instrument.get("color", self.color_accent)
+        canvas.create_oval(2, 2, 22, 22, fill=THEME["surface_hover"], outline=color, width=1)
+        label = str(instrument.get("label") or instrument.get("key") or "?")
+        canvas.create_text(12, 12, text=label[:1].upper(), fill=color, font=self.font_small)
+
+    def _set_price_row_hover(self, row, surface_widgets, key, entered):
+        """Apply an event-only row hover without masking drag feedback."""
+        if not row.winfo_exists():
+            return
+        bg = THEME["surface_hover"] if entered else self.color_card_alt
+        row.configure(bg=bg)
+        for widget in surface_widgets:
+            if widget.winfo_exists():
+                widget.configure(bg=bg)
+        if self._row_drag_key != key:
+            row.configure(
+                highlightbackground=THEME["border_strong"] if entered else self.color_border
+            )
 
     def create_price_row(self, instrument, parent=None):
         if parent is None:
             parent = self.frame
-        row = tk.Frame(parent, bg=self.color_card_alt, padx=9, pady=7, highlightthickness=1, highlightbackground=self.color_border)
-        row.pack(fill="x", pady=3)
-        row.grid_columnconfigure(1, weight=1)
+        row = tk.Frame(
+            parent,
+            bg=self.color_card_alt,
+            padx=SPACING["xs"],
+            pady=6,
+            highlightthickness=1,
+            highlightbackground=self.color_border,
+        )
+        row.pack(fill="x", pady=SPACING["xxs"] // 2)
+        row.grid_columnconfigure(2, weight=1)
 
-        name_label = tk.Label(row, text=instrument["label"], bg=self.color_card_alt, fg=self.color_text_dim, font=self.font_label, anchor="w")
-        name_label.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        icon = tk.Canvas(row, width=24, height=24, bg=self.color_card_alt, highlightthickness=0, bd=0)
+        icon.grid(row=0, column=0, sticky="w", padx=(0, 6))
+        self._draw_asset_icon(icon, instrument)
 
-        spark = tk.Canvas(row, width=64, height=20, bg=self.color_card_alt, highlightthickness=0)
-        spark.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        name_label = tk.Label(row, text=instrument["label"], bg=self.color_card_alt, fg=self.color_text_main, font=self.font_label, anchor="w")
+        name_label.grid(row=0, column=1, sticky="w", padx=(0, SPACING["xs"]))
+
+        spark = tk.Canvas(row, width=62, height=22, bg=self.color_card_alt, highlightthickness=0, bd=0)
+        spark.grid(row=0, column=2, sticky="ew", padx=(0, SPACING["xs"]))
         
         placeholder = f"{instrument.get('currency', '')}..."
         var = tk.StringVar(value=placeholder)
@@ -1647,19 +2176,30 @@ class PiyasaWidget:
         elif instrument["key"] == "altin_tl":
             self.var_altin_tl = var
         price_label = tk.Label(row, textvariable=var, bg=self.color_card_alt, fg=instrument.get("color", self.color_text_main), font=self.font_value, anchor="e")
-        price_label.grid(row=0, column=2, sticky="e", padx=(0, 7))
+        price_label.grid(row=0, column=3, sticky="e", padx=(0, 6))
 
         change_var = tk.StringVar(value="--")
         self.price_change_vars[instrument["key"]] = change_var
-        badge = tk.Label(row, textvariable=change_var, bg="#1b2430", fg=self.color_text_muted, font=self.font_badge, padx=6, pady=1)
-        badge.grid(row=0, column=3, sticky="e")
+        badge = tk.Label(row, textvariable=change_var, bg=THEME["surface_pressed"], fg=self.color_text_muted, font=self.font_badge, padx=6, pady=2)
+        badge.grid(row=0, column=4, sticky="e")
         self.price_change_labels[instrument["key"]] = badge
         self.price_spark_canvases[instrument["key"]] = spark
         self.price_row_widgets[instrument["key"]] = row
-        self._bind_price_row_drag(
-            (row, name_label, spark, price_label, badge),
-            instrument["key"]
-        )
+        drag_widgets = (row, icon, name_label, spark, price_label, badge)
+        self._bind_price_row_drag(drag_widgets, instrument["key"])
+
+        surface_widgets = (icon, name_label, spark, price_label)
+        for widget in drag_widgets:
+            widget.bind(
+                "<Enter>",
+                lambda event, r=row, ws=surface_widgets, key=instrument["key"]: self._set_price_row_hover(r, ws, key, True),
+                add="+",
+            )
+            widget.bind(
+                "<Leave>",
+                lambda event, r=row, ws=surface_widgets, key=instrument["key"]: self._set_price_row_hover(r, ws, key, False),
+                add="+",
+            )
 
     def rebuild_price_rows(self):
         if not hasattr(self, "price_rows_frame"):
@@ -1794,7 +2334,7 @@ class PiyasaWidget:
         for row in rows:
             row.pack_forget()
         for row in rows:
-            row.pack(fill="x", pady=3)
+            row.pack(fill="x", pady=SPACING["xxs"] // 2)
 
     def _cancel_price_row_drag(self, restore=False):
         after_id = getattr(self, "_row_hold_after_id", None)
@@ -1888,8 +2428,8 @@ class PiyasaWidget:
             return
         try:
             canvas.delete("all")
-            width = canvas.winfo_width() or 64
-            height = canvas.winfo_height() or 20
+            width = canvas.winfo_width() or 62
+            height = canvas.winfo_height() or 22
             if len(values) < 2:
                 y = height // 2
                 canvas.create_line(0, y, width, y, fill=self.color_border, width=1)
@@ -1903,9 +2443,9 @@ class PiyasaWidget:
                 y = int((height - 4) * (1 - (value - min_v) / value_range)) + 2
                 points.append((x, y))
             flat = [coord for point in points for coord in point]
-            canvas.create_line(flat, fill=color, width=1.6, smooth=True)
+            canvas.create_line(flat, fill=color, width=1.5, smooth=True, splinesteps=12)
             last_x, last_y = points[-1]
-            canvas.create_oval(last_x - 2, last_y - 2, last_x + 2, last_y + 2, fill=color, outline="")
+            canvas.create_oval(last_x - 1.75, last_y - 1.75, last_x + 1.75, last_y + 1.75, fill=color, outline="")
         except Exception:
             pass
 
@@ -1922,7 +2462,7 @@ class PiyasaWidget:
                 change_var.set(self._format_change(change_pct))
             if badge:
                 if change_pct is None:
-                    badge.config(bg="#1b2430", fg=self.color_text_muted)
+                    badge.config(bg=THEME["surface_pressed"], fg=self.color_text_muted)
                 elif change_pct >= 0:
                     badge.config(bg=self.color_success_bg, fg=self.color_success)
                 else:
@@ -1956,19 +2496,44 @@ class PiyasaWidget:
             return
 
         for row_data in rows:
-            row = tk.Frame(self.portfolio_breakdown_frame, bg=self.color_card)
-            row.pack(fill="x", pady=2)
-            row.grid_columnconfigure(1, weight=1)
+            row = tk.Frame(
+                self.portfolio_breakdown_frame,
+                bg=self.color_card_alt,
+                padx=SPACING["xs"],
+                pady=5,
+                highlightthickness=1,
+                highlightbackground=self.color_border,
+            )
+            row.pack(fill="x", pady=SPACING["xxs"] // 2)
+            row.grid_columnconfigure(2, weight=1)
+
+            marker = tk.Canvas(
+                row,
+                width=10,
+                height=10,
+                bg=self.color_card_alt,
+                highlightthickness=0,
+                bd=0,
+            )
+            marker.grid(row=0, column=0, sticky="w", padx=(0, 6))
+            marker.create_oval(
+                2,
+                2,
+                8,
+                8,
+                fill=row_data.get("color", self.color_accent),
+                outline="",
+            )
 
             qty = f"{row_data['quantity']:,.2f}".rstrip("0").rstrip(".")
             left = f"{row_data['label']}: {qty} {row_data['unit']}"
-            tk.Label(row, text=left, bg=self.color_card, fg=self.color_text_dim, font=self.font_small, anchor="w").grid(row=0, column=0, sticky="w")
+            tk.Label(row, text=left, bg=self.color_card_alt, fg=self.color_text_dim, font=self.font_small, anchor="w").grid(row=0, column=1, sticky="w")
 
             if row_data["has_price"]:
                 value_text = self._format_tl(row_data["value_tl"], 0)
             else:
                 value_text = "Fiyat yok"
-            tk.Label(row, text=value_text, bg=self.color_card, fg=self.color_text_main, font=self.font_small, anchor="e").grid(row=0, column=1, sticky="e", padx=(8, 8))
+            tk.Label(row, text=value_text, bg=self.color_card_alt, fg=self.color_text_main, font=self.font_small, anchor="e").grid(row=0, column=2, sticky="e", padx=(SPACING["xs"], SPACING["xs"]))
 
             profit = row_data.get("profit_tl")
             if profit is None:
@@ -1978,7 +2543,7 @@ class PiyasaWidget:
                 sign = "+" if profit >= 0 else ""
                 profit_text = f"{sign}{self._format_tl(abs(profit), 0)}" if profit >= 0 else f"-{self._format_tl(abs(profit), 0)}"
                 profit_color = self.color_success if profit >= 0 else self.color_danger
-            tk.Label(row, text=profit_text, bg=self.color_card, fg=profit_color, font=self.font_badge, anchor="e").grid(row=0, column=2, sticky="e")
+            tk.Label(row, text=profit_text, bg=self.color_card_alt, fg=profit_color, font=self.font_badge, anchor="e").grid(row=0, column=3, sticky="e")
 
     # --- Sayfa Navigasyon Sistemi ---
     def show_page(self, index):
@@ -2002,36 +2567,54 @@ class PiyasaWidget:
             self.show_page(self.current_page - 1)
     
     def _update_arrow_colors(self):
-        self.btn_prev.config(fg="#888888" if self.current_page > 0 else "#222222")
-        self.btn_next.config(fg="#888888" if self.current_page < len(self.pages) - 1 else "#222222")
+        self.btn_prev.config(fg=self.color_text_dim if self.current_page > 0 else self.color_border)
+        self.btn_next.config(fg=self.color_text_dim if self.current_page < len(self.pages) - 1 else self.color_border)
 
     # --- Grafik Sayfası ---
     def _build_chart_page(self):
-        # Veri seçici butonlar
-        selector_frame = tk.Frame(self.page_chart, bg=self.color_card_alt, padx=6, pady=6, highlightthickness=1, highlightbackground=self.color_border)
-        selector_frame.pack(fill="x", pady=(0, 8))
-        
+        selector_frame = tk.Frame(
+            self.page_chart,
+            bg=self.color_card,
+            padx=SPACING["xs"],
+            pady=SPACING["xs"],
+            highlightthickness=1,
+            highlightbackground=self.color_border,
+        )
+        selector_frame.pack(fill="x", pady=(0, SPACING["xs"]))
+
         default_key = "gumus_tl" if any(item["key"] == "gumus_tl" for item in self.watchlist) else self.watchlist[0]["key"]
         self.chart_var = tk.StringVar(value=default_key)
         self.chart_period = tk.IntVar(value=7)
 
-        self.chart_symbol_frame = tk.Frame(selector_frame, bg=self.color_card_alt)
-        self.chart_symbol_frame.pack(side="left", fill="x", expand=True)
+        selector_header = tk.Frame(selector_frame, bg=self.color_card)
+        selector_header.pack(fill="x", pady=(0, SPACING["xs"]))
+        tk.Label(
+            selector_header,
+            text="FİYAT GEÇMİŞİ",
+            bg=self.color_card,
+            fg=self.color_text_dim,
+            font=self.font_header,
+        ).pack(side="left")
+
+        self.chart_period_control = SegmentedControl(
+            selector_header,
+            self.chart_period,
+            (("7G", 7), ("30G", 30), ("Tümü", 0)),
+            command=self._update_chart,
+        )
+        self.chart_period_control.pack(side="right")
+
+        self.chart_symbol_frame = tk.Frame(selector_frame, bg=self.color_card)
+        self.chart_symbol_frame.pack(fill="x")
         self._rebuild_chart_symbol_buttons()
-        
-        # Periyot seçici
-        period_frame = tk.Frame(selector_frame, bg=self.color_card_alt)
-        period_frame.pack(side="right")
-        for text, val in [("7G", 7), ("30G", 30), ("Tümü", 0)]:
-            rb = tk.Radiobutton(period_frame, text=text, variable=self.chart_period, value=val,
-                               bg=self.color_card_alt, fg=self.color_text_dim, selectcolor=self.color_card,
-                               activebackground=self.color_card_alt, activeforeground=self.color_text_main,
-                               font=("Segoe UI", 8), indicatoron=0, padx=4, pady=1,
-                               command=self._update_chart)
-            rb.pack(side="right", padx=1)
-        
-        # tkinter Canvas grafik
-        self.chart_canvas = tk.Canvas(self.page_chart, bg=self.color_card, highlightthickness=1, highlightbackground=self.color_border)
+
+        self.chart_canvas = tk.Canvas(
+            self.page_chart,
+            bg=self.color_card,
+            highlightthickness=1,
+            highlightbackground=self.color_border,
+            bd=0,
+        )
         self.chart_canvas.pack(fill="both", expand=True)
 
     def _instrument_by_key(self, key):
@@ -2039,6 +2622,21 @@ class PiyasaWidget:
             if instrument["key"] == key:
                 return instrument
         return self.watchlist[0] if self.watchlist else None
+
+    @staticmethod
+    def _chart_selector_label(instrument):
+        """Keep dynamic symbol selectors readable at the compact widget width."""
+        key = instrument.get("key")
+        aliases = {
+            "gumus_ons": "G. ONS",
+            "gumus_tl": "G. TL",
+            "altin_tl": "Altın",
+            "dolar": "USD",
+        }
+        if key in aliases:
+            return aliases[key]
+        label = str(instrument.get("label") or key or "Varlık")
+        return label if len(label) <= 8 else f"{label[:7]}…"
 
     def _history_source_symbol(self, key):
         instrument = self._instrument_by_key(key)
@@ -2053,18 +2651,37 @@ class PiyasaWidget:
     def _rebuild_chart_symbol_buttons(self):
         if not hasattr(self, "chart_symbol_frame"):
             return
+        previous_control = getattr(self, "chart_symbol_control", None)
+        if previous_control is not None:
+            try:
+                self.chart_var.trace_remove("write", previous_control._trace_id)
+            except (AttributeError, tk.TclError):
+                pass
         for child in self.chart_symbol_frame.winfo_children():
             child.destroy()
         valid_keys = {item["key"] for item in self.watchlist}
         if self.chart_var.get() not in valid_keys and self.watchlist:
             self.chart_var.set(self.watchlist[0]["key"])
-        for instrument in self.watchlist:
-            rb = tk.Radiobutton(self.chart_symbol_frame, text=instrument["label"], variable=self.chart_var, value=instrument["key"],
-                               bg=self.color_card_alt, fg=self.color_text_dim, selectcolor=self.color_card,
-                               activebackground=self.color_card_alt, activeforeground=self.color_text_main,
-                               font=("Segoe UI", 8), indicatoron=0, padx=6, pady=1,
-                               command=self._update_chart)
-            rb.pack(side="left", padx=1)
+        if not self.watchlist:
+            return
+        selection_colors = {
+            instrument["key"]: (
+                THEME["primary_soft"],
+                instrument.get("color", self.color_accent),
+            )
+            for instrument in self.watchlist
+        }
+        self.chart_symbol_control = SegmentedControl(
+            self.chart_symbol_frame,
+            self.chart_var,
+            tuple(
+                (self._chart_selector_label(instrument), instrument["key"])
+                for instrument in self.watchlist
+            ),
+            command=self._update_chart,
+            selection_colors=selection_colors,
+        )
+        self.chart_symbol_control.pack(fill="x")
 
     @staticmethod
     def _filter_outliers(values, timestamps):
@@ -2141,12 +2758,12 @@ class PiyasaWidget:
                 )
             
             if not data:
-                self.chart_canvas.create_text(cw//2, ch//2, text="Veri yok", fill="#aaaaaa", font=("Segoe UI", f_no_data))
+                self.chart_canvas.create_text(cw//2, ch//2, text="Henüz grafik verisi yok", fill=self.color_text_muted, font=(self.font_family, f_no_data))
                 return
             
             instrument = self._instrument_by_key(selected)
             if not instrument:
-                self.chart_canvas.create_text(cw//2, ch//2, text="Veri yok", fill="#aaaaaa", font=("Segoe UI", f_no_data))
+                self.chart_canvas.create_text(cw//2, ch//2, text="Henüz grafik verisi yok", fill=self.color_text_muted, font=(self.font_family, f_no_data))
                 return
             title = instrument["label"]
             color = instrument.get("color", self.color_accent)
@@ -2158,11 +2775,11 @@ class PiyasaWidget:
             values, timestamps = self._filter_outliers(raw_values, raw_timestamps)
             
             if not values:
-                self.chart_canvas.create_text(cw//2, ch//2, text="Veri yok", fill="#aaaaaa", font=("Segoe UI", f_no_data))
+                self.chart_canvas.create_text(cw//2, ch//2, text="Henüz grafik verisi yok", fill=self.color_text_muted, font=(self.font_family, f_no_data))
                 return
             
             # Grafik alanı (padding) — sol taraf daha geniş, okunabilirlik için
-            pad_l, pad_r, pad_t, pad_b = 50, 15, 25, 30
+            pad_l, pad_r, pad_t, pad_b = 48, 14, 34, 28
             gw = cw - pad_l - pad_r
             gh = ch - pad_t - pad_b
             
@@ -2175,13 +2792,19 @@ class PiyasaWidget:
             chart_max = max_v + margin
             val_range = chart_max - chart_min if chart_max != chart_min else 1
             
-            # Başlık
-            self.chart_canvas.create_text(cw//2, 10, text=title, fill="#cccccc", font=("Segoe UI", f_title))
+            self.chart_canvas.create_text(
+                pad_l,
+                15,
+                text=title,
+                fill=self.color_text_main,
+                font=(self.font_family, f_title, "bold"),
+                anchor="w",
+            )
             
             # Grid çizgileri ve Y ekseni etiketleri
             for i in range(5):
                 y = pad_t + int(gh * i / 4)
-                self.chart_canvas.create_line(pad_l, y, cw - pad_r, y, fill="#222222", dash=(2, 4))
+                self.chart_canvas.create_line(pad_l, y, cw - pad_r, y, fill=self.color_border, dash=(2, 5))
                 v = chart_max - (val_range * i / 4)
                 if v >= 10000:
                     fmt = f"{v:,.0f}"
@@ -2189,7 +2812,7 @@ class PiyasaWidget:
                     fmt = f"{v:.1f}"
                 else:
                     fmt = f"{v:.2f}"
-                self.chart_canvas.create_text(pad_l - 5, y, text=fmt, fill="#888888", font=("Segoe UI", f_tick), anchor="e")
+                self.chart_canvas.create_text(pad_l - 6, y, text=fmt, fill=self.color_text_muted, font=(self.font_family, f_tick), anchor="e")
             
             # Veri noktalarını canvas koordinatlarına çevir
             n = len(values)
@@ -2199,7 +2822,7 @@ class PiyasaWidget:
                 y = pad_t + int(gh * (1 - (v - chart_min) / val_range))
                 points.append((x, y))
             
-            # Dolgu (gradient efekti)
+            # A light stippled area preserves depth without adding animation.
             if len(points) >= 2:
                 fill_points = list(points) + [(points[-1][0], pad_t + gh), (points[0][0], pad_t + gh)]
                 flat = [coord for p in fill_points for coord in p]
@@ -2208,7 +2831,7 @@ class PiyasaWidget:
             # Çizgi
             if len(points) >= 2:
                 flat_line = [coord for p in points for coord in p]
-                self.chart_canvas.create_line(flat_line, fill=color, width=1.5, smooth=True)
+                self.chart_canvas.create_line(flat_line, fill=color, width=2, smooth=True, splinesteps=12)
             
             # X ekseni etiketleri
             label_count = min(4, n)
@@ -2225,42 +2848,95 @@ class PiyasaWidget:
                         label = dt.strftime("%d/%m")
                 except:
                     label = str(ts)[:5]
-                self.chart_canvas.create_text(x, ch - 10, text=label, fill="#888888", font=("Segoe UI", f_tick))
+                self.chart_canvas.create_text(x, ch - 10, text=label, fill=self.color_text_muted, font=(self.font_family, f_tick))
             
             # Son değer etiketi
             last_x, last_y = points[-1]
             last_v = values[-1]
             fmt_v = format_instrument_value(instrument, last_v)
-            self.chart_canvas.create_oval(last_x-3, last_y-3, last_x+3, last_y+3, fill=color, outline="")
+            self.chart_canvas.create_oval(last_x-3, last_y-3, last_x+3, last_y+3, fill=color, outline=self.color_card, width=1)
             # Etiketi grafik sınırları içinde tut
             label_y = max(last_y - 12, pad_t + 5)
-            self.chart_canvas.create_text(last_x, label_y, text=fmt_v, fill=color, font=("Segoe UI", f_val, "bold"))
+            self.chart_canvas.create_text(last_x, label_y, text=fmt_v, fill=color, font=(self.font_family, f_val, "bold"))
             
         except Exception as e:
             log_message(f"Chart error: {e}")
 
     # --- İstatistik Sayfası ---
     def _build_stats_page(self):
-        # Periyot seçici
-        period_frame = tk.Frame(self.page_stats, bg=self.color_card_alt, padx=6, pady=6, highlightthickness=1, highlightbackground=self.color_border)
-        period_frame.pack(fill="x", pady=(0, 8))
-        
+        period_frame = tk.Frame(
+            self.page_stats,
+            bg=self.color_card,
+            padx=SPACING["xs"],
+            pady=SPACING["xs"],
+            highlightthickness=1,
+            highlightbackground=self.color_border,
+        )
+        period_frame.pack(fill="x", pady=(0, SPACING["xs"]))
+
         self.stats_period = tk.IntVar(value=7)
-        
-        for text, val in [("7 Gün", 7), ("30 Gün", 30), ("Tümü", 0)]:
-            rb = tk.Radiobutton(period_frame, text=text, variable=self.stats_period, value=val,
-                               bg=self.color_card_alt, fg=self.color_text_dim, selectcolor=self.color_card,
-                               activebackground=self.color_card_alt, activeforeground=self.color_text_main,
-                               font=("Segoe UI", 8), indicatoron=0, padx=6, pady=2,
-                               command=self._update_stats)
-            rb.pack(side="left", padx=2)
-        
-        # İstatistik satırları
-        self.stats_frame = tk.Frame(self.page_stats, bg=self.bg_color)
-        self.stats_frame.pack(fill="both", expand=True)
+
+        tk.Label(
+            period_frame,
+            text="PİYASA İSTATİSTİKLERİ",
+            bg=self.color_card,
+            fg=self.color_text_dim,
+            font=self.font_header,
+        ).pack(side="left")
+        self.stats_period_control = SegmentedControl(
+            period_frame,
+            self.stats_period,
+            (("7G", 7), ("30G", 30), ("Tümü", 0)),
+            command=self._update_stats,
+        )
+        self.stats_period_control.pack(side="right")
+
+        stats_container = tk.Frame(self.page_stats, bg=self.bg_color)
+        stats_container.pack(fill="both", expand=True)
+        self.stats_canvas = tk.Canvas(
+            stats_container,
+            bg=self.bg_color,
+            highlightthickness=0,
+            bd=0,
+        )
+        self.stats_scrollbar = ttk.Scrollbar(
+            stats_container,
+            orient="vertical",
+            command=self.stats_canvas.yview,
+            style="Modern.Vertical.TScrollbar",
+        )
+        self.stats_canvas.configure(yscrollcommand=self.stats_scrollbar.set)
+        self.stats_scrollbar.pack(side="right", fill="y")
+        self.stats_canvas.pack(side="left", fill="both", expand=True)
+        self.stats_frame = tk.Frame(self.stats_canvas, bg=self.bg_color)
+        self._stats_window_id = self.stats_canvas.create_window(
+            (0, 0), window=self.stats_frame, anchor="nw"
+        )
+        self.stats_frame.bind(
+            "<Configure>",
+            lambda _event: self.stats_canvas.configure(
+                scrollregion=self.stats_canvas.bbox("all")
+            ),
+        )
+        self.stats_canvas.bind(
+            "<Configure>",
+            lambda event: self.stats_canvas.itemconfigure(
+                self._stats_window_id, width=event.width
+            ),
+        )
+        self.stats_canvas.bind("<MouseWheel>", self._on_stats_mousewheel)
         
         self.stats_labels = {}
         self._rebuild_stats_sections()
+
+    def _on_stats_mousewheel(self, event):
+        self.stats_canvas.yview_scroll(-3 if event.delta > 0 else 3, "units")
+        return "break"
+
+    def _bind_stats_mousewheel(self, widget):
+        widget.bind("<MouseWheel>", self._on_stats_mousewheel, add="+")
+        for child in widget.winfo_children():
+            self._bind_stats_mousewheel(child)
 
     def _rebuild_stats_sections(self):
         if not hasattr(self, "stats_frame"):
@@ -2271,29 +2947,49 @@ class PiyasaWidget:
         self.stats_labels = {}
         for instrument in self.watchlist:
             key = instrument["key"]
-            section = tk.Frame(self.stats_frame, bg=self.color_card_alt, padx=9, pady=7, highlightthickness=1, highlightbackground=self.color_border)
-            section.pack(fill="x", pady=3)
-            
-            tk.Label(section, text=instrument["label"], bg=self.color_card_alt, fg=instrument.get("color", self.color_accent), font=("Segoe UI Semibold", 8)).pack(anchor="w")
-            
-            row = tk.Frame(section, bg=self.color_card_alt)
-            row.pack(fill="x")
-            
+            section = tk.Frame(
+                self.stats_frame,
+                bg=self.color_card_alt,
+                padx=SPACING["xs"],
+                pady=6,
+                highlightthickness=1,
+                highlightbackground=self.color_border,
+            )
+            section.pack(fill="x", pady=SPACING["xxs"] // 2)
+
+            tk.Label(
+                section,
+                text=instrument["label"],
+                bg=self.color_card_alt,
+                fg=instrument.get("color", self.color_accent),
+                font=self.font_label,
+            ).pack(anchor="w", pady=(0, SPACING["xxs"]))
+
+            metrics = tk.Frame(section, bg=self.color_card_alt)
+            metrics.pack(fill="x")
+            for column in (0, 1):
+                metrics.grid_columnconfigure(column, weight=1, uniform="stats")
+
             self.stats_labels[key] = {}
-            self.stats_labels[key]["min"] = tk.Label(row, text="Min: --", bg=self.color_card_alt, fg=self.color_text_dim, font=("Segoe UI", 8))
-            self.stats_labels[key]["min"].pack(side="left", expand=True)
-            
-            self.stats_labels[key]["max"] = tk.Label(row, text="Max: --", bg=self.color_card_alt, fg=self.color_text_dim, font=("Segoe UI", 8))
-            self.stats_labels[key]["max"].pack(side="left", expand=True)
-            
-            row2 = tk.Frame(section, bg=self.color_card_alt)
-            row2.pack(fill="x")
-            
-            self.stats_labels[key]["avg"] = tk.Label(row2, text="Ort: --", bg=self.color_card_alt, fg=self.color_text_dim, font=("Segoe UI", 8))
-            self.stats_labels[key]["avg"].pack(side="left", expand=True)
-            
-            self.stats_labels[key]["chg"] = tk.Label(row2, text="Δ: --", bg=self.color_card_alt, fg=self.color_text_dim, font=("Segoe UI", 8))
-            self.stats_labels[key]["chg"].pack(side="left", expand=True)
+            for metric, text, grid_row, grid_column in (
+                ("min", "Min: --", 0, 0),
+                ("max", "Max: --", 0, 1),
+                ("avg", "Ort: --", 1, 0),
+                ("chg", "Değişim: --", 1, 1),
+            ):
+                label = tk.Label(
+                    metrics,
+                    text=text,
+                    bg=self.color_card_alt,
+                    fg=self.color_text_dim,
+                    font=self.font_small,
+                    anchor="w",
+                )
+                label.grid(row=grid_row, column=grid_column, sticky="ew", pady=1)
+                self.stats_labels[key][metric] = label
+            self._bind_stats_mousewheel(section)
+
+        self.stats_canvas.yview_moveto(0)
 
     def _update_stats(self):
         try:
@@ -2318,7 +3014,7 @@ class PiyasaWidget:
                     labels["min"].config(text="Min: --")
                     labels["max"].config(text="Max: --")
                     labels["avg"].config(text="Ort: --")
-                    labels["chg"].config(text="Δ: --", fg="#aaaaaa")
+                    labels["chg"].config(text="Değişim: --", fg=self.color_text_muted)
                     continue
 
                 mn, mx, avg = stats[0], stats[1], stats[2]
@@ -2335,9 +3031,9 @@ class PiyasaWidget:
                         chg = ((last_value - first_value) / first_value) * 100
                         sign = "+" if chg >= 0 else ""
                         color = self.color_success if chg >= 0 else self.color_danger
-                        labels["chg"].config(text=f"Δ: {sign}{chg:.1f}%", fg=color)
+                        labels["chg"].config(text=f"Değişim: {sign}{chg:.1f}%", fg=color)
                     else:
-                        labels["chg"].config(text="Δ: --", fg="#aaaaaa")
+                        labels["chg"].config(text="Değişim: --", fg=self.color_text_muted)
         except Exception as e:
             log_message(f"Stats error: {e}")
 
@@ -2842,10 +3538,10 @@ class PiyasaWidget:
         self.font_portfolio.config(size=int(self.base_fonts["portfolio"] * scale))
         self.font_profit.config(size=int(self.base_fonts["profit"] * scale))
         self.font_market_status.config(size=int(self.base_fonts["market_status"] * scale))
-        self.font_nav_arrow.config(size=int(9 * scale))
-        self.font_icon.config(size=int(10 * scale))
-        self.font_small.config(size=int(8 * scale))
-        self.font_badge.config(size=int(8 * scale))
+        self.font_nav_arrow.config(size=int(self.base_fonts["nav_arrow"] * scale))
+        self.font_icon.config(size=int(self.base_fonts["icon"] * scale))
+        self.font_small.config(size=int(self.base_fonts["small"] * scale))
+        self.font_badge.config(size=int(self.base_fonts["badge"] * scale))
         
         # Grafik sayfasındaysa güncel boyutlara göre yeniden çiz
         if hasattr(self, 'current_page') and self.current_page == 1:
