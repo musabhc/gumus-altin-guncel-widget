@@ -215,7 +215,15 @@ class SearchEntry(tk.Frame):
 class SegmentedControl(tk.Frame):
     """Button-based segmented control backed by an existing Tk variable."""
 
-    def __init__(self, master, variable, options, command=None, selection_colors=None):
+    def __init__(
+        self,
+        master,
+        variable,
+        options,
+        command=None,
+        selection_colors=None,
+        columns=None,
+    ):
         super().__init__(
             master,
             bg=THEME["border"],
@@ -228,8 +236,11 @@ class SegmentedControl(tk.Frame):
         self.options = list(options)
         self.selection_colors = selection_colors or {}
         self.buttons = {}
-        for column, (label, value) in enumerate(self.options):
+        column_count = max(1, min(columns or len(self.options), len(self.options)))
+        for column in range(column_count):
             self.grid_columnconfigure(column, weight=1, uniform="segment")
+        for index, (label, value) in enumerate(self.options):
+            row, column = divmod(index, column_count)
             button = tk.Button(
                 self,
                 text=label,
@@ -246,7 +257,13 @@ class SegmentedControl(tk.Frame):
                 padx=8,
                 pady=8,
             )
-            button.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 1, 0))
+            button.grid(
+                row=row,
+                column=column,
+                sticky="nsew",
+                padx=(0 if column == 0 else 1, 0),
+                pady=(0 if row == 0 else 1, 0),
+            )
             button.bind("<Enter>", lambda _e, b=button, v=value: self._hover(b, v, True), add="+")
             button.bind("<Leave>", lambda _e, b=button, v=value: self._hover(b, v, False), add="+")
             self.buttons[value] = button
@@ -282,6 +299,205 @@ class SegmentedControl(tk.Frame):
                     activebackground=THEME["surface_hover"],
                     activeforeground=THEME["text_primary"],
                 )
+
+
+class ThemedPopupMenu(tk.Toplevel):
+    """Small frameless popup that remains themeable on native Windows Tk."""
+
+    def __init__(self, master, *, width=224):
+        super().__init__(master)
+        self.withdraw()
+        self.overrideredirect(True)
+        self.configure(bg=THEME["border_strong"], bd=0)
+        try:
+            self.transient(master.winfo_toplevel())
+        except tk.TclError:
+            pass
+        self.menu_width = width
+        self.items = []
+        self._variable_traces = []
+        self._visible = False
+        self.body = tk.Frame(
+            self,
+            bg=THEME["surface_alt"],
+            bd=0,
+            padx=1,
+            pady=1,
+        )
+        self.body.pack(fill="both", expand=True, padx=1, pady=1)
+        self.bind("<Escape>", lambda _event: self.hide(), add="+")
+        self.bind("<FocusOut>", self._on_focus_out, add="+")
+
+    @staticmethod
+    def _bind_row(widgets, callback):
+        for widget in widgets:
+            widget.bind("<ButtonRelease-1>", callback, add="+")
+
+    @staticmethod
+    def _set_row_background(widgets, color):
+        for widget in widgets:
+            widget.configure(bg=color)
+
+    def _make_row(self, label, *, danger=False):
+        row = tk.Frame(
+            self.body,
+            bg=THEME["surface_alt"],
+            width=self.menu_width,
+            height=36,
+            cursor="hand2",
+        )
+        row.pack(fill="x")
+        row.pack_propagate(False)
+        text = tk.Label(
+            row,
+            text=label,
+            bg=THEME["surface_alt"],
+            fg=THEME["negative"] if danger else THEME["text_primary"],
+            font=font(self, "body"),
+            anchor="w",
+            cursor="hand2",
+        )
+        text.pack(side="left", fill="both", expand=True, padx=(12, 6))
+        return row, text
+
+    def add_command(self, *, label, command, danger=False):
+        row, text = self._make_row(label, danger=danger)
+        widgets = (row, text)
+        for widget in widgets:
+            widget.bind(
+                "<Enter>",
+                lambda _event, ws=widgets: self._set_row_background(
+                    ws, THEME["surface_hover"]
+                ),
+                add="+",
+            )
+            widget.bind(
+                "<Leave>",
+                lambda _event, ws=widgets: self._set_row_background(
+                    ws, THEME["surface_alt"]
+                ),
+                add="+",
+            )
+
+        def invoke(_event=None):
+            self.hide()
+            if command:
+                command()
+            return "break"
+
+        self._bind_row(widgets, invoke)
+        self.items.append({"type": "command", "label": label, "row": row})
+        return row
+
+    def add_checkbutton(self, *, label, variable, command):
+        row, text = self._make_row(label)
+        indicator = tk.Label(
+            row,
+            text="",
+            bg=THEME["surface_alt"],
+            fg=THEME["primary"],
+            font=font(self, "body", "bold"),
+            width=2,
+            cursor="hand2",
+        )
+        indicator.pack(side="right", padx=(2, 8))
+        widgets = (row, text, indicator)
+
+        def render(*_args):
+            indicator.configure(text="✓" if variable.get() else "")
+
+        trace_id = variable.trace_add("write", render)
+        self._variable_traces.append((variable, trace_id))
+        render()
+        for widget in widgets:
+            widget.bind(
+                "<Enter>",
+                lambda _event, ws=widgets: self._set_row_background(
+                    ws, THEME["surface_hover"]
+                ),
+                add="+",
+            )
+            widget.bind(
+                "<Leave>",
+                lambda _event, ws=widgets: self._set_row_background(
+                    ws, THEME["surface_alt"]
+                ),
+                add="+",
+            )
+
+        def invoke(_event=None):
+            variable.set(not bool(variable.get()))
+            self.hide()
+            if command:
+                command()
+            return "break"
+
+        self._bind_row(widgets, invoke)
+        self.items.append({"type": "check", "label": label, "row": row})
+        return row
+
+    def add_separator(self):
+        separator = tk.Frame(self.body, bg=THEME["border"], height=1)
+        separator.pack(fill="x", padx=8, pady=4)
+        self.items.append({"type": "separator", "label": None, "row": separator})
+        return separator
+
+    def show_for_widget(self, anchor, *, gap=8):
+        self.update_idletasks()
+        width = max(self.menu_width, self.winfo_reqwidth())
+        height = self.winfo_reqheight()
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        x = anchor.winfo_rootx() + anchor.winfo_width() - width
+        y = anchor.winfo_rooty() - height - gap
+        if y < 0:
+            y = anchor.winfo_rooty() + anchor.winfo_height() + gap
+        x = max(4, min(x, screen_width - width - 4))
+        y = max(4, min(y, screen_height - height - 4))
+        self.geometry(f"{width}x{height}+{x}+{y}")
+        self.deiconify()
+        self.lift()
+        self._visible = True
+        try:
+            self.focus_force()
+        except tk.TclError:
+            pass
+
+    def toggle_for_widget(self, anchor):
+        if self._visible:
+            self.hide()
+        else:
+            self.show_for_widget(anchor)
+
+    def hide(self):
+        self._visible = False
+        try:
+            self.withdraw()
+        except tk.TclError:
+            pass
+
+    def is_visible(self):
+        return self._visible
+
+    def _on_focus_out(self, _event=None):
+        def hide_if_focus_left():
+            try:
+                focused = self.focus_displayof()
+                if focused is None or not str(focused).startswith(str(self)):
+                    self.hide()
+            except tk.TclError:
+                self.hide()
+
+        self.after(20, hide_if_focus_left)
+
+    def destroy(self):
+        for variable, trace_id in self._variable_traces:
+            try:
+                variable.trace_remove("write", trace_id)
+            except tk.TclError:
+                pass
+        self._variable_traces.clear()
+        super().destroy()
 
 
 class IconButton(tk.Canvas):
@@ -366,6 +582,11 @@ class IconButton(tk.Canvas):
         elif self.icon == "plus":
             self.create_line(c - 6, c, c + 6, c, fill=color, width=2, tags=tag)
             self.create_line(c, c - 6, c, c + 6, fill=color, width=2, tags=tag)
+        elif self.icon == "minus":
+            self.create_line(c - 6, c, c + 6, c, fill=color, width=2, tags=tag)
+        elif self.icon == "reset":
+            self.create_arc(c - 7, c - 7, c + 7, c + 7, start=25, extent=300, style="arc", outline=color, width=w, tags=tag)
+            self.create_line(c - 7, c - 5, c - 8, c, c - 3, c - 1, fill=color, width=w, tags=tag)
         elif self.icon == "refresh":
             self.create_arc(c - 7, c - 7, c + 7, c + 7, start=35, extent=275, style="arc", outline=color, width=w, tags=tag)
             self.create_line(c + 5, c - 7, c + 8, c - 7, c + 8, c - 3, fill=color, width=w, tags=tag)

@@ -228,6 +228,106 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         )
         self.assertEqual(self.app.current_page, 0)
 
+    def test_chart_controls_expose_all_periods_and_interactions(self):
+        self._require_tk()
+        self._build_piyasa_widget()
+
+        rendered_options = tuple(
+            (button.cget("text"), value)
+            for value, button in self.app.chart_period_control.buttons.items()
+        )
+        self.assertEqual(rendered_options, self.app.CHART_PERIOD_OPTIONS)
+        self.assertEqual(len(rendered_options), 8)
+        self.assertEqual(
+            [
+                (int(button.grid_info()["row"]), int(button.grid_info()["column"]))
+                for button in self.app.chart_period_control.buttons.values()
+            ],
+            [
+                (0, 0), (0, 1), (0, 2), (0, 3),
+                (1, 0), (1, 1), (1, 2), (1, 3),
+            ],
+        )
+
+        for sequence in (
+            "<MouseWheel>",
+            "<Button-4>",
+            "<Button-5>",
+            "<ButtonPress-1>",
+            "<B1-Motion>",
+            "<ButtonRelease-1>",
+            "<Double-Button-1>",
+        ):
+            with self.subTest(sequence=sequence):
+                self.assertTrue(self.app.chart_canvas.bind(sequence))
+
+        self.app._chart_full_values = list(range(20))
+        self.app._chart_plot_bounds = (20, 10, 220, 180)
+        with patch.object(self.app, "_draw_chart") as draw_chart:
+            wheel = SimpleNamespace(delta=120, x=120)
+            self.assertEqual(self.app._on_chart_mousewheel(wheel), "break")
+            self.assertAlmostEqual(self.app._chart_view_start, 0.175)
+            self.assertAlmostEqual(self.app._chart_view_end, 0.825)
+
+            self.assertEqual(
+                self.app._on_chart_pan_start(SimpleNamespace(x=120)),
+                "break",
+            )
+            before_pan = (
+                self.app._chart_view_start,
+                self.app._chart_view_end,
+            )
+            self.assertEqual(
+                self.app._on_chart_pan_motion(SimpleNamespace(x=150)),
+                "break",
+            )
+            self.assertNotEqual(
+                (self.app._chart_view_start, self.app._chart_view_end),
+                before_pan,
+            )
+            self.assertEqual(self.app._on_chart_pan_end(), "break")
+            self.assertIsNone(self.app._chart_pan_origin)
+
+            self.assertEqual(
+                self.app.reset_chart_view(SimpleNamespace()),
+                "break",
+            )
+            self.assertEqual(
+                (self.app._chart_view_start, self.app._chart_view_end),
+                (0.0, 1.0),
+            )
+            self.assertGreaterEqual(draw_chart.call_count, 3)
+
+    def test_settings_menu_is_a_themeable_popup_with_preserved_actions(self):
+        self._require_tk()
+        self._build_piyasa_widget()
+
+        self.assertIsInstance(self.app.settings_menu, main.ThemedPopupMenu)
+        self.assertIsInstance(self.app.settings_menu, tk.Toplevel)
+        self.assertEqual(
+            [
+                (item["type"], item["label"])
+                for item in self.app.settings_menu.items
+            ],
+            [
+                ("check", "Windows ile başlat"),
+                ("check", "Her zaman üstte"),
+                ("separator", None),
+                ("command", "İzlenenleri düzenle"),
+                ("command", "Güncellemeleri kontrol et"),
+                ("separator", None),
+                ("command", "Kapat"),
+            ],
+        )
+        self.assertEqual(
+            self.app.settings_menu.cget("bg"),
+            main.THEME["border_strong"],
+        )
+        self.assertEqual(
+            self.app.settings_menu.body.cget("bg"),
+            main.THEME["surface_alt"],
+        )
+
     def test_portfolio_dialog_search_filter_and_source_indices(self):
         self._require_tk()
         self.root = tk.Tk()

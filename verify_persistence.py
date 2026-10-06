@@ -250,6 +250,307 @@ class TestDynamicMarketPersistence(unittest.TestCase):
             db.conn.close()
 
 
+class TestHistoricalChartInfrastructure(unittest.TestCase):
+    def test_default_widget_geometry_matches_reference_desktop(self):
+        self.assertEqual(
+            main.PiyasaWidget.calculate_default_geometry(1920, 1080),
+            (368, 536, 1522, 50),
+        )
+
+    def test_chart_periods_cover_all_requested_windows(self):
+        self.assertEqual(
+            main.PiyasaWidget.CHART_PERIOD_OPTIONS,
+            (
+                ("30 dakika", 30 * 60),
+                ("1 saat", 60 * 60),
+                ("6 saat", 6 * 60 * 60),
+                ("12 saat", 12 * 60 * 60),
+                ("24 saat", 24 * 60 * 60),
+                ("7 gün", 7 * 24 * 60 * 60),
+                ("30 gün", 30 * 24 * 60 * 60),
+                ("Tümü", 0),
+            ),
+        )
+
+    def test_zoom_and_pan_ranges_are_clamped_and_preserve_span(self):
+        zoomed = main.calculate_zoomed_range(
+            0.0,
+            1.0,
+            True,
+            anchor=0.25,
+        )
+        self.assertAlmostEqual(zoomed[0], 0.0875)
+        self.assertAlmostEqual(zoomed[1], 0.7375)
+        self.assertAlmostEqual(zoomed[1] - zoomed[0], 0.65)
+
+        self.assertEqual(
+            main.calculate_panned_range(0.2, 0.6, -1.0),
+            (0.0, 0.4),
+        )
+        right_clamped = main.calculate_panned_range(0.2, 0.6, 1.0)
+        self.assertAlmostEqual(right_clamped[0], 0.6)
+        self.assertAlmostEqual(right_clamped[1], 1.0)
+        self.assertAlmostEqual(right_clamped[1] - right_clamped[0], 0.4)
+
+    def test_downsampling_keeps_endpoints_and_local_extrema(self):
+        rows = [
+            (f"2026-01-01T00:{index:02d}:00", value)
+            for index, value in enumerate(
+                (10, 11, 12, 99, -25, 13, 14, 15, 16, 17, 18)
+            )
+        ]
+
+        sampled = main.downsample_history_rows(rows, 6)
+
+        self.assertLessEqual(len(sampled), 6)
+        self.assertEqual(sampled[0], rows[0])
+        self.assertEqual(sampled[-1], rows[-1])
+        self.assertIn(rows[3], sampled)
+        self.assertIn(rows[4], sampled)
+        self.assertEqual(
+            [timestamp for timestamp, _price in sampled],
+            sorted(timestamp for timestamp, _price in sampled),
+        )
+
+    def test_history_rows_are_interval_aware_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = main.MarketHistoryDB(os.path.join(tmp, "history.db"))
+            instrument = {
+                "key": "thyao",
+                "label": "THYAO",
+                "symbol": "THYAO.IS",
+            }
+            now = main.datetime.now().replace(microsecond=0)
+            rows = [
+                ((now - main.timedelta(hours=2)).isoformat(), 285.0),
+                ((now - main.timedelta(minutes=50)).isoformat(), 290.0),
+                ((now - main.timedelta(minutes=10)).isoformat(), 295.0),
+            ]
+            try:
+                self.assertEqual(
+                    db.insert_history_rows(
+                        instrument,
+                        rows,
+                        "5m",
+                        source_symbol="THYAO.IS",
+                    ),
+                    3,
+                )
+                self.assertEqual(
+                    db.insert_history_rows(
+                        instrument,
+                        rows,
+                        "5m",
+                        source_symbol="THYAO.IS",
+                    ),
+                    0,
+                )
+                db.insert_history_rows(
+                    instrument,
+                    [(rows[-1][0], 999.0)],
+                    "1d",
+                    source_symbol="THYAO.IS",
+                )
+
+                recent = db.get_history(
+                    "thyao",
+                    hours=1,
+                    source_symbol=("THYAO.IS", "UNUSED"),
+                    intervals=("5m",),
+                )
+                daily = db.get_all_history(
+                    "thyao",
+                    source_symbol="THYAO.IS",
+                    intervals=("1d",),
+                )
+
+                self.assertEqual([price for _timestamp, price in recent], [290.0, 295.0])
+                self.assertEqual([price for _timestamp, price in daily], [999.0])
+                count = db.conn.execute(
+                    "SELECT COUNT(*) FROM market_price_history "
+                    "WHERE instrument_key = ? AND interval = ?",
+                    ("thyao", "5m"),
+                ).fetchone()[0]
+                self.assertEqual(count, 3)
+            finally:
+                db.conn.close()
+
+    def test_metal_history_uses_latest_prior_fx_and_rejects_stale_fx(self):
+        base_rows = [
+            ("2026-01-01T10:30:00", main.TROY_OUNCE_GRAMS),
+            ("2026-01-01T11:30:00", 2 * main.TROY_OUNCE_GRAMS),
+            ("2026-01-06T12:00:00", main.TROY_OUNCE_GRAMS),
+        ]
+        fx_rows = [
+            ("2026-01-01T10:00:00", 40.0),
+            ("2026-01-01T11:00:00", 42.0),
+        ]
+
+        converted = main.PiyasaWidget._combine_history_with_fx(
+            base_rows,
+            fx_rows,
+        )
+
+        self.assertEqual(
+            [timestamp for timestamp, _price in converted],
+            ["2026-01-01T10:30:00", "2026-01-01T11:30:00"],
+        )
+        self.assertAlmostEqual(converted[0][1], 40.0)
+        self.assertAlmostEqual(converted[1][1], 84.0)
+
+    def test_intraday_fx_conversion_rejects_a_stale_quote(self):
+        converted = main.PiyasaWidget._combine_history_with_fx(
+            [
+                ("2026-01-01T10:10:00", main.TROY_OUNCE_GRAMS),
+                ("2026-01-01T10:20:00", main.TROY_OUNCE_GRAMS),
+            ],
+            [("2026-01-01T10:00:00", 40.0)],
+            "5m",
+        )
+
+        self.assertEqual(converted, [("2026-01-01T10:10:00", 40.0)])
+
+    def test_latest_anchored_window_works_for_a_closed_market(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = main.MarketHistoryDB(os.path.join(tmp, "history.db"))
+            instrument = {
+                "key": "thyao",
+                "label": "THYAO",
+                "symbol": "THYAO.IS",
+            }
+            try:
+                db.insert_history_rows(
+                    instrument,
+                    [
+                        ("2020-01-03T16:00:00", 10.0),
+                        ("2020-01-03T16:30:00", 11.0),
+                        ("2020-01-03T17:00:00", 12.0),
+                    ],
+                    "5m",
+                )
+
+                wall_clock = db.get_history(
+                    "thyao", hours=1, intervals=("5m",)
+                )
+                latest_session = db.get_history(
+                    "thyao",
+                    hours=1,
+                    intervals=("5m",),
+                    anchor_to_latest=True,
+                )
+
+                self.assertEqual(wall_clock, [])
+                self.assertEqual(
+                    [price for _timestamp, price in latest_session],
+                    [10.0, 11.0, 12.0],
+                )
+            finally:
+                db.conn.close()
+
+    def test_silver_chart_prefers_proxy_bars_without_mixing_spot_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = main.PiyasaWidget.__new__(main.PiyasaWidget)
+            widget.watchlist = main.default_watchlist()
+            widget.history_db = main.MarketHistoryDB(
+                os.path.join(tmp, "history.db")
+            )
+            silver = next(
+                item for item in widget.watchlist
+                if item["key"] == "gumus_ons"
+            )
+            now = main.datetime.now().replace(microsecond=0)
+            try:
+                widget.history_db.insert_history_rows(
+                    silver,
+                    [
+                        ((now - main.timedelta(minutes=10)).isoformat(), 60.0),
+                        (now.isoformat(), 61.0),
+                    ],
+                    "5m",
+                    source_symbol=main.SILVER_HISTORY_PROXY_SYMBOL,
+                )
+                widget.history_db.insert_prices(
+                    {"gumus_ons": 80.0},
+                    [silver],
+                    timestamp=now.isoformat(),
+                )
+
+                rows, source, interval = widget._cached_history_series(
+                    "gumus_ons", 24 * 60 * 60
+                )
+
+                self.assertEqual([price for _timestamp, price in rows], [60.0, 61.0])
+                self.assertEqual(source, main.SILVER_HISTORY_PROXY_SYMBOL)
+                self.assertEqual(interval, "5m")
+            finally:
+                widget.history_db.conn.close()
+
+    def test_valid_long_term_trend_is_not_removed_as_an_outlier(self):
+        values = [float(value) for value in range(1, 301)]
+        timestamps = [f"2026-01-{(index % 28) + 1:02d}" for index in range(300)]
+
+        filtered, filtered_timestamps = main.PiyasaWidget._filter_outliers(
+            values, timestamps
+        )
+
+        self.assertEqual(filtered, values)
+        self.assertEqual(filtered_timestamps, timestamps)
+
+    def test_yahoo_history_uses_adjusted_prices(self):
+        widget = main.PiyasaWidget.__new__(main.PiyasaWidget)
+        ticker = MagicMock()
+        ticker.history.return_value = None
+        with patch.object(main.yf, "Ticker", return_value=ticker):
+            self.assertEqual(widget._download_yahoo_history("THYAO.IS", "1d"), [])
+
+        self.assertTrue(ticker.history.call_args.kwargs["auto_adjust"])
+        self.assertEqual(ticker.history.call_args.kwargs["period"], "max")
+
+    def test_history_sync_persists_provider_bars_and_marks_profile_fresh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            widget = main.PiyasaWidget.__new__(main.PiyasaWidget)
+            instrument = next(
+                item for item in main.default_watchlist()
+                if item["key"] == "thyao"
+            )
+            widget.watchlist = [instrument]
+            widget.history_db = main.MarketHistoryDB(
+                os.path.join(tmp, "history.db")
+            )
+            widget._stop_event = threading.Event()
+            provider_rows = [
+                ("2026-10-05T10:00:00", 290.0),
+                ("2026-10-05T10:05:00", 291.0),
+            ]
+            widget._download_yahoo_history = MagicMock(
+                return_value=provider_rows
+            )
+            try:
+                inserted = widget._sync_history_profile(
+                    "5m", main.timedelta(minutes=30)
+                )
+
+                self.assertEqual(inserted, 2)
+                self.assertEqual(
+                    widget.history_db.get_all_history(
+                        "thyao",
+                        source_symbol="THYAO.IS",
+                        intervals=("5m",),
+                    ),
+                    provider_rows,
+                )
+                self.assertFalse(
+                    widget.history_db.history_sync_due(
+                        "thyao",
+                        "THYAO.IS",
+                        "5m",
+                        main.timedelta(minutes=30),
+                    )
+                )
+            finally:
+                widget.history_db.conn.close()
+
+
 class TestMultiAssetPortfolio(unittest.TestCase):
     def test_legacy_transactions_are_read_as_silver_position(self):
         with tempfile.TemporaryDirectory() as tmp:

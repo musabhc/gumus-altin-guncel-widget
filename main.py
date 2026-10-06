@@ -8,6 +8,7 @@ import sys
 import json
 import sqlite3
 import os
+import math
 import winreg
 import ctypes
 import requests
@@ -23,6 +24,7 @@ from ui_components import (
     ModernEntry,
     SearchEntry,
     SegmentedControl,
+    ThemedPopupMenu,
     TransactionTable,
 )
 
@@ -40,6 +42,7 @@ TROY_OUNCE_GRAMS = 31.1035
 SILVER_SPOT_SYMBOL = "XAG"
 SILVER_SPOT_API_URL = "https://api.gold-api.com/price/XAG"
 LEGACY_SILVER_FUTURES_SYMBOL = "SI=F"
+SILVER_HISTORY_PROXY_SYMBOL = LEGACY_SILVER_FUTURES_SYMBOL
 SILVER_SPOT_KEYS = {"gumus_ons", "gumus_tl"}
 SILVER_SPOT_SOURCES = {"silver_spot", "silver_spot_try"}
 
@@ -134,6 +137,115 @@ def calculate_reordered_keys(ordered_keys, dragged_key, pointer_y, midpoints_by_
     )
     remaining.insert(target_index, dragged_key)
     return remaining
+
+
+def parse_history_timestamp(value):
+    """Return a local, timezone-naive datetime for stored/provider timestamps."""
+    try:
+        if hasattr(value, "to_pydatetime"):
+            parsed = value.to_pydatetime()
+        elif isinstance(value, datetime):
+            parsed = value
+        else:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+        return parsed
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def normalize_history_timestamp(value):
+    """Normalize provider timestamps so SQLite text ordering stays reliable."""
+    parsed = parse_history_timestamp(value)
+    if parsed is None:
+        return str(value)
+    return parsed.replace(microsecond=0).isoformat()
+
+
+def downsample_history_rows(rows, max_points):
+    """Reduce dense history while retaining each bucket's local high and low."""
+    rows = list(rows or [])
+    try:
+        max_points = int(max_points)
+    except (TypeError, ValueError):
+        max_points = 0
+    if max_points < 3 or len(rows) <= max_points:
+        return rows
+
+    interior = rows[1:-1]
+    bucket_count = max(1, (max_points - 2) // 2)
+    bucket_size = max(1, (len(interior) + bucket_count - 1) // bucket_count)
+    sampled = [rows[0]]
+    for offset in range(0, len(interior), bucket_size):
+        bucket = interior[offset:offset + bucket_size]
+        if not bucket:
+            continue
+        indexed = list(enumerate(bucket))
+        low = min(indexed, key=lambda item: float(item[1][1]))
+        high = max(indexed, key=lambda item: float(item[1][1]))
+        for _index, row in sorted({low[0]: low, high[0]: high}.values()):
+            sampled.append(row)
+    sampled.append(rows[-1])
+    return sampled[:max_points - 1] + [rows[-1]] if len(sampled) > max_points else sampled
+
+
+def history_rows_in_window(rows, seconds):
+    """Return the requested time span, anchored to the newest available bar."""
+    prepared = []
+    for timestamp, value in rows or []:
+        parsed = parse_history_timestamp(timestamp)
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed is None or not math.isfinite(numeric) or numeric <= 0:
+            continue
+        prepared.append((parsed, normalize_history_timestamp(parsed), numeric))
+    prepared.sort(key=lambda row: row[0])
+    if not prepared or not seconds:
+        return [(stored, value) for _parsed, stored, value in prepared]
+    cutoff = prepared[-1][0] - timedelta(seconds=float(seconds))
+    return [
+        (stored, value)
+        for parsed, stored, value in prepared
+        if parsed >= cutoff
+    ]
+
+
+def calculate_zoomed_range(start, end, zoom_in, anchor=0.5, min_span=0.02):
+    """Calculate a clamped normalized chart viewport around an anchor point."""
+    start = max(0.0, min(float(start), 1.0))
+    end = max(start, min(float(end), 1.0))
+    anchor = max(0.0, min(float(anchor), 1.0))
+    min_span = max(0.001, min(float(min_span), 1.0))
+    span = max(min_span, end - start)
+    new_span = span * (0.65 if zoom_in else (1 / 0.65))
+    new_span = max(min_span, min(new_span, 1.0))
+    anchor_value = start + (span * anchor)
+    new_start = anchor_value - (new_span * anchor)
+    new_end = new_start + new_span
+    if new_start < 0:
+        new_end -= new_start
+        new_start = 0.0
+    if new_end > 1:
+        new_start -= new_end - 1.0
+        new_end = 1.0
+    return max(0.0, new_start), min(1.0, new_end)
+
+
+def calculate_panned_range(start, end, shift):
+    """Shift a normalized chart viewport without changing its zoom level."""
+    start = float(start)
+    end = float(end)
+    span = round(max(0.0, min(end - start, 1.0)), 12)
+    new_start = start + float(shift)
+    new_end = new_start + span
+    if new_start < 0:
+        return 0.0, span
+    if new_end > 1:
+        return 1.0 - span, 1.0
+    return new_start, new_end
 
 
 def make_watchlist_key(label, symbol):
@@ -580,50 +692,97 @@ class MarketHistoryDB:
     def __init__(self, db_name="market_history.db"):
         self.db_path = db_name if os.path.isabs(db_name) else app_path(db_name)
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._lock = threading.RLock()
         self._create_table()
         self.cleanup_bad_records()
         self._migrate_legacy_history()
 
     def _create_table(self):
-        self.conn.execute("""
-            CREATE TABLE IF NOT EXISTS market_price_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                instrument_key TEXT NOT NULL,
-                label TEXT,
-                source_symbol TEXT,
-                price REAL NOT NULL
-            )
-        """)
-        columns = {
-            row[1]
-            for row in self.conn.execute("PRAGMA table_info(market_price_history)").fetchall()
-        }
-        if "source_symbol" not in columns:
+        with self._lock:
             self.conn.execute(
-                "ALTER TABLE market_price_history ADD COLUMN source_symbol TEXT"
+                """
+                CREATE TABLE IF NOT EXISTS market_price_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    instrument_key TEXT NOT NULL,
+                    label TEXT,
+                    source_symbol TEXT,
+                    price REAL NOT NULL,
+                    interval TEXT NOT NULL DEFAULT 'live'
+                )
+                """
             )
-        self.conn.execute(
-            "UPDATE market_price_history SET source_symbol = ? "
-            "WHERE source_symbol IS NULL AND instrument_key IN (?, ?)",
-            (LEGACY_SILVER_FUTURES_SYMBOL, "gumus_ons", "gumus_tl")
-        )
-        self.conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_market_price_history_key_time
-            ON market_price_history (instrument_key, timestamp)
-        """)
-        self.conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_market_price_history_key_source_time
-            ON market_price_history (instrument_key, source_symbol, timestamp)
-        """)
-        self.conn.commit()
+            columns = {
+                row[1]
+                for row in self.conn.execute(
+                    "PRAGMA table_info(market_price_history)"
+                ).fetchall()
+            }
+            if "source_symbol" not in columns:
+                self.conn.execute(
+                    "ALTER TABLE market_price_history ADD COLUMN source_symbol TEXT"
+                )
+            if "interval" not in columns:
+                self.conn.execute(
+                    "ALTER TABLE market_price_history "
+                    "ADD COLUMN interval TEXT NOT NULL DEFAULT 'live'"
+                )
+            self.conn.execute(
+                "UPDATE market_price_history SET source_symbol = ? "
+                "WHERE source_symbol IS NULL AND instrument_key IN (?, ?)",
+                (LEGACY_SILVER_FUTURES_SYMBOL, "gumus_ons", "gumus_tl")
+            )
+            self.conn.execute(
+                "UPDATE market_price_history SET interval = 'live' "
+                "WHERE interval IS NULL OR interval = ''"
+            )
+            unique_index_exists = self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'index' "
+                "AND name = 'idx_market_history_unique_bar'"
+            ).fetchone()
+            # This one-time cleanup lets older databases adopt immutable bars.
+            # Avoid rescanning a potentially large history on every startup.
+            if not unique_index_exists:
+                self.conn.execute(
+                    "DELETE FROM market_price_history WHERE id NOT IN ("
+                    "SELECT MAX(id) FROM market_price_history GROUP BY "
+                    "timestamp, instrument_key, COALESCE(source_symbol, ''), interval)"
+                )
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_market_price_history_key_time
+                ON market_price_history (instrument_key, timestamp)
+            """)
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_market_price_history_key_source_time
+                ON market_price_history (instrument_key, source_symbol, timestamp)
+            """)
+            self.conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_market_history_unique_bar
+                ON market_price_history (
+                    instrument_key,
+                    COALESCE(source_symbol, ''),
+                    interval,
+                    timestamp
+                )
+            """)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS market_history_sync (
+                    instrument_key TEXT NOT NULL,
+                    source_symbol TEXT NOT NULL,
+                    interval TEXT NOT NULL,
+                    synced_at TEXT NOT NULL,
+                    PRIMARY KEY (instrument_key, source_symbol, interval)
+                )
+            """)
+            self.conn.commit()
 
     def _table_exists(self, table_name):
-        cursor = self.conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-            (table_name,)
-        )
-        return cursor.fetchone() is not None
+        with self._lock:
+            cursor = self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table_name,)
+            )
+            return cursor.fetchone() is not None
 
     def cleanup_bad_records(self):
         """Veritabanındaki sıfır veya None değerli bozuk kayıtları temizle."""
@@ -688,7 +847,7 @@ class MarketHistoryDB:
                 for key, value in values.items():
                     if value and value > 0:
                         self.conn.execute(
-                            "INSERT INTO market_price_history "
+                            "INSERT OR IGNORE INTO market_price_history "
                             "(timestamp, instrument_key, label, source_symbol, price) "
                             "VALUES (?, ?, ?, ?, ?)",
                             (
@@ -715,94 +874,254 @@ class MarketHistoryDB:
         }
         self.insert_prices(prices, default_watchlist())
 
-    def insert_prices(self, prices, instruments=None, timestamp=None):
+    def insert_prices(self, prices, instruments=None, timestamp=None, interval="live"):
         if not prices:
             return
-        timestamp = timestamp or datetime.now().isoformat()
+        timestamp = normalize_history_timestamp(timestamp or datetime.now())
         instrument_map = {item["key"]: item for item in (instruments or [])}
         inserted = 0
-        for key, value in prices.items():
+        with self._lock:
+            for key, value in prices.items():
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if value <= 0:
+                    continue
+                label = instrument_map.get(key, {}).get("label", key)
+                source_symbol = instrument_map.get(key, {}).get("symbol")
+                cursor = self.conn.execute(
+                    "INSERT OR IGNORE INTO market_price_history "
+                    "(timestamp, instrument_key, label, source_symbol, price, interval) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (timestamp, key, label, source_symbol, value, interval)
+                )
+                inserted += max(cursor.rowcount, 0)
+            if inserted:
+                self.conn.commit()
+        return inserted
+
+    def insert_history_rows(
+        self,
+        instrument,
+        rows,
+        interval,
+        *,
+        source_symbol=None,
+    ):
+        """Persist immutable provider bars and return the number newly cached."""
+        if not instrument or not rows:
+            return 0
+        key = instrument["key"]
+        label = instrument.get("label", key)
+        source_symbol = source_symbol or instrument.get("symbol") or ""
+        prepared = []
+        for timestamp, value in rows:
             try:
                 value = float(value)
             except (TypeError, ValueError):
                 continue
             if value <= 0:
                 continue
-            label = instrument_map.get(key, {}).get("label", key)
-            source_symbol = instrument_map.get(key, {}).get("symbol")
-            self.conn.execute(
-                "INSERT INTO market_price_history "
-                "(timestamp, instrument_key, label, source_symbol, price) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (timestamp, key, label, source_symbol, value)
+            prepared.append(
+                (
+                    normalize_history_timestamp(timestamp),
+                    key,
+                    label,
+                    source_symbol,
+                    value,
+                    interval,
+                )
             )
-            inserted += 1
-        if inserted:
-            self.conn.commit()
+        if not prepared:
+            return 0
+        with self._lock:
+            before = self.conn.total_changes
+            self.conn.executemany(
+                "INSERT OR IGNORE INTO market_price_history "
+                "(timestamp, instrument_key, label, source_symbol, price, interval) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                prepared,
+            )
+            inserted = self.conn.total_changes - before
+            if inserted:
+                self.conn.commit()
+        return inserted
 
-    def get_history(self, instrument_key="gumus_tl", days=7, source_symbol=None):
-        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
-        query = (
-            "SELECT timestamp, price FROM market_price_history "
-            "WHERE instrument_key = ? AND timestamp >= ? AND price > 0"
-        )
-        params = [instrument_key, cutoff]
-        if source_symbol:
-            query += " AND source_symbol = ?"
-            params.append(source_symbol)
-        cursor = self.conn.execute(query + " ORDER BY timestamp", tuple(params))
-        return cursor.fetchall()
+    @staticmethod
+    def _append_interval_filter(clauses, params, intervals):
+        intervals = tuple(intervals or ())
+        if not intervals:
+            return
+        placeholders = ",".join("?" for _item in intervals)
+        clauses.append(f"interval IN ({placeholders})")
+        params.extend(intervals)
 
-    def get_all_history(self, instrument_key="gumus_tl", source_symbol=None):
-        query = (
-            "SELECT timestamp, price FROM market_price_history "
-            "WHERE instrument_key = ? AND price > 0"
-        )
-        params = [instrument_key]
-        if source_symbol:
-            query += " AND source_symbol = ?"
-            params.append(source_symbol)
-        cursor = self.conn.execute(query + " ORDER BY timestamp", tuple(params))
-        return cursor.fetchall()
-
-    def get_stats(self, instrument_key="gumus_tl", days=None, source_symbol=None):
-        clauses = ["instrument_key = ?", "price > 0"]
-        params = [instrument_key]
-        if days:
-            cutoff = (datetime.now() - timedelta(days=days)).isoformat()
-            clauses.append("timestamp >= ?")
-            params.append(cutoff)
-        if source_symbol:
+    @staticmethod
+    def _append_source_filter(clauses, params, source_symbol):
+        if not source_symbol:
+            return
+        if isinstance(source_symbol, (list, tuple, set)):
+            sources = tuple(str(item) for item in source_symbol if item)
+            if not sources:
+                return
+            placeholders = ",".join("?" for _item in sources)
+            clauses.append(f"source_symbol IN ({placeholders})")
+            params.extend(sources)
+        else:
             clauses.append("source_symbol = ?")
             params.append(source_symbol)
-        cursor = self.conn.execute(
-            "SELECT MIN(price), MAX(price), AVG(price), COUNT(*) "
-            "FROM market_price_history WHERE " + " AND ".join(clauses),
-            tuple(params)
-        )
-        return cursor.fetchone()
 
-    def get_first_last(self, instrument_key="gumus_tl", days=None, source_symbol=None):
+    def get_history(
+        self,
+        instrument_key="gumus_tl",
+        days=7,
+        source_symbol=None,
+        *,
+        hours=None,
+        intervals=None,
+        anchor_to_latest=False,
+    ):
+        delta = timedelta(hours=hours) if hours is not None else timedelta(days=days)
         clauses = ["instrument_key = ?", "price > 0"]
         params = [instrument_key]
-        if days:
-            cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+        self._append_source_filter(clauses, params, source_symbol)
+        self._append_interval_filter(clauses, params, intervals)
+        end_at = None
+        if anchor_to_latest:
+            with self._lock:
+                latest = self.conn.execute(
+                    "SELECT MAX(timestamp) FROM market_price_history WHERE "
+                    + " AND ".join(clauses),
+                    tuple(params),
+                ).fetchone()
+            end_at = parse_history_timestamp(latest[0]) if latest and latest[0] else None
+        end_at = end_at or datetime.now()
+        cutoff = normalize_history_timestamp(end_at - delta)
+        clauses.extend(("timestamp >= ?", "timestamp <= ?"))
+        params.extend((cutoff, normalize_history_timestamp(end_at)))
+        query = (
+            "SELECT timestamp, price FROM market_price_history WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY timestamp"
+        )
+        with self._lock:
+            return self.conn.execute(query, tuple(params)).fetchall()
+
+    def get_all_history(
+        self,
+        instrument_key="gumus_tl",
+        source_symbol=None,
+        *,
+        intervals=None,
+    ):
+        clauses = ["instrument_key = ?", "price > 0"]
+        params = [instrument_key]
+        self._append_source_filter(clauses, params, source_symbol)
+        self._append_interval_filter(clauses, params, intervals)
+        query = (
+            "SELECT timestamp, price FROM market_price_history WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY timestamp"
+        )
+        with self._lock:
+            return self.conn.execute(query, tuple(params)).fetchall()
+
+    def get_stats(
+        self,
+        instrument_key="gumus_tl",
+        days=None,
+        source_symbol=None,
+        *,
+        hours=None,
+        intervals=None,
+    ):
+        clauses = ["instrument_key = ?", "price > 0"]
+        params = [instrument_key]
+        if hours is not None or days:
+            delta = timedelta(hours=hours) if hours is not None else timedelta(days=days)
+            cutoff = normalize_history_timestamp(datetime.now() - delta)
             clauses.append("timestamp >= ?")
             params.append(cutoff)
-        if source_symbol:
-            clauses.append("source_symbol = ?")
-            params.append(source_symbol)
+        self._append_source_filter(clauses, params, source_symbol)
+        self._append_interval_filter(clauses, params, intervals)
+        with self._lock:
+            cursor = self.conn.execute(
+                "SELECT MIN(price), MAX(price), AVG(price), COUNT(*) "
+                "FROM market_price_history WHERE " + " AND ".join(clauses),
+                tuple(params)
+            )
+            return cursor.fetchone()
+
+    def get_first_last(
+        self,
+        instrument_key="gumus_tl",
+        days=None,
+        source_symbol=None,
+        *,
+        hours=None,
+        intervals=None,
+    ):
+        clauses = ["instrument_key = ?", "price > 0"]
+        params = [instrument_key]
+        if hours is not None or days:
+            delta = timedelta(hours=hours) if hours is not None else timedelta(days=days)
+            cutoff = normalize_history_timestamp(datetime.now() - delta)
+            clauses.append("timestamp >= ?")
+            params.append(cutoff)
+        self._append_source_filter(clauses, params, source_symbol)
+        self._append_interval_filter(clauses, params, intervals)
         base_query = (
             "SELECT price FROM market_price_history WHERE "
             + " AND ".join(clauses)
         )
-        first = self.conn.execute(
-            base_query + " ORDER BY timestamp ASC LIMIT 1", tuple(params)
-        ).fetchone()
-        last = self.conn.execute(
-            base_query + " ORDER BY timestamp DESC LIMIT 1", tuple(params)
-        ).fetchone()
+        with self._lock:
+            first = self.conn.execute(
+                base_query + " ORDER BY timestamp ASC LIMIT 1", tuple(params)
+            ).fetchone()
+            last = self.conn.execute(
+                base_query + " ORDER BY timestamp DESC LIMIT 1", tuple(params)
+            ).fetchone()
         return first, last
+
+    def history_sync_due(
+        self,
+        instrument_key,
+        source_symbol,
+        interval,
+        max_age,
+        now=None,
+    ):
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT synced_at FROM market_history_sync "
+                "WHERE instrument_key = ? AND source_symbol = ? AND interval = ?",
+                (instrument_key, source_symbol or "", interval),
+            ).fetchone()
+        if not row:
+            return True
+        synced_at = parse_history_timestamp(row[0])
+        now = now or datetime.now()
+        return synced_at is None or now - synced_at >= max_age
+
+    def mark_history_synced(
+        self,
+        instrument_key,
+        source_symbol,
+        interval,
+        timestamp=None,
+    ):
+        synced_at = normalize_history_timestamp(timestamp or datetime.now())
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO market_history_sync "
+                "(instrument_key, source_symbol, interval, synced_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(instrument_key, source_symbol, interval) "
+                "DO UPDATE SET synced_at = excluded.synced_at",
+                (instrument_key, source_symbol or "", interval, synced_at),
+            )
+            self.conn.commit()
 
 class AutoStartManager:
     def __init__(self, app_name="PiyasaWidget"):
@@ -1807,6 +2126,29 @@ class WatchlistDialog(tk.Toplevel):
 class PiyasaWidget:
     ROW_DRAG_HOLD_MS = 1000
     ROW_DRAG_MOVE_TOLERANCE_PX = 6
+    DEFAULT_WIDGET_WIDTH = 368
+    DEFAULT_WIDGET_HEIGHT = 536
+    DEFAULT_RIGHT_MARGIN = 30
+    DEFAULT_TOP_MARGIN = 50
+    CHART_PERIOD_OPTIONS = (
+        ("30 dakika", 30 * 60),
+        ("1 saat", 60 * 60),
+        ("6 saat", 6 * 60 * 60),
+        ("12 saat", 12 * 60 * 60),
+        ("24 saat", 24 * 60 * 60),
+        ("7 gün", 7 * 24 * 60 * 60),
+        ("30 gün", 30 * 24 * 60 * 60),
+        ("Tümü", 0),
+    )
+
+    @classmethod
+    def calculate_default_geometry(cls, screen_width, screen_height):
+        width = min(cls.DEFAULT_WIDGET_WIDTH, max(300, screen_width - 20))
+        available_height = max(360, screen_height - 100)
+        height = min(cls.DEFAULT_WIDGET_HEIGHT, available_height)
+        x = max(0, screen_width - width - cls.DEFAULT_RIGHT_MARGIN)
+        y = max(0, min(cls.DEFAULT_TOP_MARGIN, screen_height - height))
+        return width, height, x, y
 
     def __init__(self):
         self.root = tk.Tk()
@@ -1843,8 +2185,10 @@ class PiyasaWidget:
         # Başlangıç Konumu (Sağ Üst)
         screen_width = self.root.winfo_screenwidth()
         screen_height = self.root.winfo_screenheight()
-        initial_height = min(520, max(420, screen_height - 100))
-        self.root.geometry(f"320x{initial_height}+{screen_width-350}+50")
+        width, height, x, y = self.calculate_default_geometry(
+            screen_width, screen_height
+        )
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
         
         # Managers
         self.tm = TransactionManager()
@@ -1855,7 +2199,11 @@ class PiyasaWidget:
         self.history_db = MarketHistoryDB()
         self.current_page = 0
         self._fetch_lock = threading.Lock()
+        self._history_fetch_lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._history_thread = None
+        self._history_resync_requested = False
+        self._last_prices = {}
         self._row_hold_after_id = None
         self._row_press_key = None
         self._row_press_origin = None
@@ -1891,24 +2239,32 @@ class PiyasaWidget:
         # Ayarlar Menüsü (çark simgesi)
         self.var_autostart = tk.BooleanVar(value=self.asm.is_enabled())
         self.var_topmost = tk.BooleanVar(value=self.default_topmost)
-        self.settings_menu = tk.Menu(self.root, tearoff=0, **menu_style)
+        self.settings_menu = ThemedPopupMenu(self.root)
         self.settings_menu.add_checkbutton(
             label="Windows ile başlat",
             variable=self.var_autostart,
             command=self.toggle_autostart,
-            selectcolor=self.color_card
         )
         self.settings_menu.add_checkbutton(
             label="Her zaman üstte",
             variable=self.var_topmost,
             command=self.toggle_topmost,
-            selectcolor=self.color_card
         )
         self.settings_menu.add_separator()
-        self.settings_menu.add_command(label="İzlenenleri düzenle", command=self.open_watchlist_settings)
-        self.settings_menu.add_command(label="Güncellemeleri kontrol et", command=self.check_updates)
+        self.settings_menu.add_command(
+            label="İzlenenleri düzenle",
+            command=self.open_watchlist_settings,
+        )
+        self.settings_menu.add_command(
+            label="Güncellemeleri kontrol et",
+            command=self.check_updates,
+        )
         self.settings_menu.add_separator()
-        self.settings_menu.add_command(label="Kapat", command=self.kapat)
+        self.settings_menu.add_command(
+            label="Kapat",
+            command=self.kapat,
+            danger=True,
+        )
         
         # İlk Veri Çekme
         self.update_thread = threading.Thread(target=self.veri_dongusu, daemon=True)
@@ -2167,7 +2523,7 @@ class PiyasaWidget:
         name_label.grid(row=0, column=1, sticky="w", padx=(0, SPACING["xs"]))
 
         spark = tk.Canvas(row, width=62, height=22, bg=self.color_card_alt, highlightthickness=0, bd=0)
-        spark.grid(row=0, column=2, sticky="ew", padx=(0, SPACING["xs"]))
+        spark.grid(row=0, column=2, sticky="w", padx=(0, SPACING["xs"]))
         
         placeholder = f"{instrument.get('currency', '')}..."
         var = tk.StringVar(value=placeholder)
@@ -2393,68 +2749,59 @@ class PiyasaWidget:
         sign = "+" if change_pct >= 0 else ""
         return f"{sign}{change_pct:.1f}%"
 
-    def _get_change_pct(self, key, current_value):
+    def _get_change_pct(self, key, _current_value):
+        """Return the same 24-hour change represented by the mini chart."""
         try:
-            first, last = self.history_db.get_first_last(
-                key,
-                days=7,
-                source_symbol=self._history_source_symbol(key)
+            rows, _source, _interval = self._cached_history_series(
+                key, 24 * 60 * 60
             )
         except Exception:
             return None
-        first_value = None
-        if first:
-            try:
-                first_value = float(first[0])
-            except (TypeError, ValueError):
-                first_value = None
-        if not first_value:
+        if len(rows) < 2:
             return None
-        try:
-            current_value = float(current_value)
-        except (TypeError, ValueError):
-            if last:
-                try:
-                    current_value = float(last[0])
-                except (TypeError, ValueError):
-                    return None
-            else:
-                return None
-        if first_value == 0:
+        first_value = float(rows[0][1])
+        last_value = float(rows[-1][1])
+        if first_value <= 0:
             return None
-        return ((current_value - first_value) / first_value) * 100
+        return ((last_value - first_value) / first_value) * 100
 
     def _get_sparkline_values(self, key, current_value):
-        values = []
         try:
-            data = self.history_db.get_history(
-                key,
-                days=7,
-                source_symbol=self._history_source_symbol(key)
+            rows, _source, _interval = self._cached_history_series(
+                key, 24 * 60 * 60
             )
         except Exception:
-            data = []
-        if isinstance(data, (list, tuple)):
-            for row in data[-28:]:
-                try:
-                    values.append(float(row[1]))
-                except (TypeError, ValueError, IndexError):
-                    pass
-        try:
-            current_value = float(current_value)
-        except (TypeError, ValueError):
-            current_value = None
-        if current_value and (not values or values[-1] != current_value):
-            values.append(current_value)
-        return [v for v in values if v > 0]
+            rows = []
+        if not rows:
+            try:
+                current_value = float(current_value)
+            except (TypeError, ValueError):
+                current_value = None
+            if current_value and current_value > 0:
+                rows = [(normalize_history_timestamp(datetime.now()), current_value)]
+        return [row[1] for row in downsample_history_rows(rows, 40)]
 
     def _draw_sparkline(self, canvas, values, color):
         if not canvas:
             return
         try:
+            canvas._sparkline_payload = (list(values), color)
+            if not getattr(canvas, "_sparkline_resize_bound", False):
+                canvas.bind(
+                    "<Configure>",
+                    lambda _event, target=canvas: self._draw_sparkline(
+                        target, *target._sparkline_payload
+                    ),
+                    add="+",
+                )
+                canvas._sparkline_resize_bound = True
             canvas.delete("all")
-            width = canvas.winfo_width() or 62
-            height = canvas.winfo_height() or 22
+            width = canvas.winfo_width()
+            height = canvas.winfo_height()
+            if width <= 1:
+                width = max(canvas.winfo_reqwidth(), 62)
+            if height <= 1:
+                height = max(canvas.winfo_reqheight(), 22)
             if len(values) < 2:
                 y = height // 2
                 canvas.create_line(0, y, width, y, fill=self.color_border, width=1)
@@ -2468,7 +2815,9 @@ class PiyasaWidget:
                 y = int((height - 4) * (1 - (value - min_v) / value_range)) + 2
                 points.append((x, y))
             flat = [coord for point in points for coord in point]
-            canvas.create_line(flat, fill=color, width=1.5, smooth=True, splinesteps=12)
+            # Straight segments preserve the provider bars. Tk's spline mode
+            # can overshoot real highs/lows and make a sparkline look invented.
+            canvas.create_line(flat, fill=color, width=1.5)
             last_x, last_y = points[-1]
             canvas.create_oval(last_x - 1.75, last_y - 1.75, last_x + 1.75, last_y + 1.75, fill=color, outline="")
         except Exception:
@@ -2609,7 +2958,16 @@ class PiyasaWidget:
 
         default_key = "gumus_tl" if any(item["key"] == "gumus_tl" for item in self.watchlist) else self.watchlist[0]["key"]
         self.chart_var = tk.StringVar(value=default_key)
-        self.chart_period = tk.IntVar(value=7)
+        self.chart_period = tk.IntVar(value=24 * 60 * 60)
+        self._chart_view_start = 0.0
+        self._chart_view_end = 1.0
+        self._chart_pan_origin = None
+        self._chart_full_values = []
+        self._chart_full_timestamps = []
+        self._chart_instrument = None
+        self._chart_history_source = None
+        self._chart_history_interval = None
+        self._chart_plot_bounds = (48, 14, 230, 170)
 
         selector_header = tk.Frame(selector_frame, bg=self.color_card)
         selector_header.pack(fill="x", pady=(0, SPACING["xs"]))
@@ -2621,17 +2979,66 @@ class PiyasaWidget:
             font=self.font_header,
         ).pack(side="left")
 
-        self.chart_period_control = SegmentedControl(
-            selector_header,
-            self.chart_period,
-            (("7G", 7), ("30G", 30), ("Tümü", 0)),
-            command=self._update_chart,
+        zoom_toolbar = tk.Frame(selector_header, bg=self.color_card)
+        zoom_toolbar.pack(side="right")
+        self.chart_zoom_reset_button = IconButton(
+            zoom_toolbar,
+            "reset",
+            self.reset_chart_view,
+            size=24,
+            bg=self.color_card,
+            hover_bg=THEME["surface_hover"],
+            fg=self.color_text_muted,
+            hover_fg=self.color_text_main,
+            show_border=False,
         )
-        self.chart_period_control.pack(side="right")
+        self.chart_zoom_reset_button.pack(side="right", padx=(SPACING["xxs"], 0))
+        self.chart_zoom_out_button = IconButton(
+            zoom_toolbar,
+            "minus",
+            lambda: self._zoom_chart(False, 0.5),
+            size=24,
+            bg=self.color_card,
+            hover_bg=THEME["surface_hover"],
+            fg=self.color_text_muted,
+            hover_fg=self.color_text_main,
+            show_border=False,
+        )
+        self.chart_zoom_out_button.pack(side="right", padx=(SPACING["xxs"], 0))
+        self.chart_zoom_in_button = IconButton(
+            zoom_toolbar,
+            "plus",
+            lambda: self._zoom_chart(True, 0.5),
+            size=24,
+            bg=self.color_card,
+            hover_bg=THEME["surface_hover"],
+            fg=self.color_text_muted,
+            hover_fg=self.color_text_main,
+            show_border=False,
+        )
+        self.chart_zoom_in_button.pack(side="right")
+
+        self.chart_period_control = SegmentedControl(
+            selector_frame,
+            self.chart_period,
+            self.CHART_PERIOD_OPTIONS,
+            command=self._on_chart_filter_changed,
+            columns=4,
+        )
+        self.chart_period_control.pack(fill="x", pady=(0, SPACING["xs"]))
 
         self.chart_symbol_frame = tk.Frame(selector_frame, bg=self.color_card)
         self.chart_symbol_frame.pack(fill="x")
         self._rebuild_chart_symbol_buttons()
+
+        tk.Label(
+            selector_frame,
+            text="Tekerlek: yakınlaştır  •  Sürükle: kaydır  •  Çift tık: sıfırla",
+            bg=self.color_card,
+            fg=self.color_text_muted,
+            font=self.font_small,
+            anchor="w",
+        ).pack(fill="x", pady=(SPACING["xs"], 0))
 
         self.chart_canvas = tk.Canvas(
             self.page_chart,
@@ -2641,6 +3048,15 @@ class PiyasaWidget:
             bd=0,
         )
         self.chart_canvas.pack(fill="both", expand=True)
+        self.chart_canvas.configure(cursor="hand2")
+        self.chart_canvas.bind("<Configure>", self._on_chart_canvas_configure, add="+")
+        self.chart_canvas.bind("<MouseWheel>", self._on_chart_mousewheel, add="+")
+        self.chart_canvas.bind("<Button-4>", lambda event: self._on_chart_mousewheel(event, 120), add="+")
+        self.chart_canvas.bind("<Button-5>", lambda event: self._on_chart_mousewheel(event, -120), add="+")
+        self.chart_canvas.bind("<ButtonPress-1>", self._on_chart_pan_start, add="+")
+        self.chart_canvas.bind("<B1-Motion>", self._on_chart_pan_motion, add="+")
+        self.chart_canvas.bind("<ButtonRelease-1>", self._on_chart_pan_end, add="+")
+        self.chart_canvas.bind("<Double-Button-1>", self.reset_chart_view, add="+")
 
     def _instrument_by_key(self, key):
         for instrument in self.watchlist:
@@ -2673,6 +3089,76 @@ class PiyasaWidget:
             return SILVER_SPOT_SYMBOL
         return None
 
+    def _history_source_symbols(self, key):
+        """Include the live spot source and its explicit historical proxy."""
+        source = self._history_source_symbol(key)
+        if source == SILVER_SPOT_SYMBOL:
+            return (SILVER_SPOT_SYMBOL, SILVER_HISTORY_PROXY_SYMBOL)
+        return source
+
+    def _cached_history_series(self, key, period_seconds=0):
+        """Select one source and one resolution so a line cannot zig-zag.
+
+        Provider 5-minute bars are authoritative for finite periods. Runtime
+        samples are only a fallback. For the all-time view, daily bars are
+        authoritative. Silver spot uses the explicitly recorded SI=F proxy
+        until a genuine spot-history source is available.
+        """
+        instrument = self._instrument_by_key(key)
+        if not instrument:
+            return [], None, None
+        provider_source = self._history_cache_source(instrument)
+        live_source = instrument.get("symbol") or provider_source
+
+        if not period_seconds:
+            rows = self.history_db.get_all_history(
+                key,
+                source_symbol=provider_source,
+                intervals=("1d",),
+            )
+            if rows:
+                return self._merge_history_rows(rows), provider_source, "1d"
+            for source in dict.fromkeys((live_source, provider_source)):
+                rows = self.history_db.get_all_history(
+                    key,
+                    source_symbol=source,
+                    intervals=("live",),
+                )
+                if rows:
+                    return self._merge_history_rows(rows), source, "live"
+            return [], provider_source, "1d"
+
+        hours = float(period_seconds) / 3600
+        rows = self.history_db.get_history(
+            key,
+            source_symbol=provider_source,
+            hours=hours,
+            intervals=("5m",),
+            anchor_to_latest=True,
+        )
+        if rows:
+            return (
+                history_rows_in_window(rows, period_seconds),
+                provider_source,
+                "5m",
+            )
+
+        for source in dict.fromkeys((live_source, provider_source)):
+            rows = self.history_db.get_history(
+                key,
+                source_symbol=source,
+                hours=hours,
+                intervals=("live",),
+                anchor_to_latest=True,
+            )
+            if rows:
+                return (
+                    history_rows_in_window(rows, period_seconds),
+                    source,
+                    "live",
+                )
+        return [], provider_source, "5m"
+
     def _rebuild_chart_symbol_buttons(self):
         if not hasattr(self, "chart_symbol_frame"):
             return
@@ -2703,120 +3189,179 @@ class PiyasaWidget:
                 (self._chart_selector_label(instrument), instrument["key"])
                 for instrument in self.watchlist
             ),
-            command=self._update_chart,
+            command=self._on_chart_filter_changed,
             selection_colors=selection_colors,
         )
         self.chart_symbol_control.pack(fill="x")
 
     @staticmethod
     def _filter_outliers(values, timestamps):
-        """IQR tabanlı outlier filtreleme. Bozuk veri noktalarını temizler."""
-        if len(values) < 4:
-            return values, timestamps
-        
-        # None ve sıfır değerleri filtrele
+        """Discard malformed values without deleting valid market moves."""
         clean_vals = []
         clean_ts = []
         for v, t in zip(values, timestamps):
-            if v is not None and v > 0:
-                clean_vals.append(v)
+            try:
+                numeric = float(v)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(numeric) and numeric > 0:
+                clean_vals.append(numeric)
                 clean_ts.append(t)
-        
-        if len(clean_vals) < 4:
-            return clean_vals, clean_ts
-        
-        # IQR hesapla
-        sorted_v = sorted(clean_vals)
-        n = len(sorted_v)
-        q1 = sorted_v[n // 4]
-        q3 = sorted_v[(3 * n) // 4]
-        iqr = q3 - q1
-        
-        # IQR 0 ise medyan etrafında %20 tolerans kullan
-        if iqr == 0:
-            median = sorted_v[n // 2]
-            lower = median * 0.8
-            upper = median * 1.2
-        else:
-            lower = q1 - 2.0 * iqr
-            upper = q3 + 2.0 * iqr
-        
-        filtered_vals = []
-        filtered_ts = []
-        for v, t in zip(clean_vals, clean_ts):
-            if lower <= v <= upper:
-                filtered_vals.append(v)
-                filtered_ts.append(t)
-        
-        # Filtreleme sonrası veri kalmadıysa orijinali döndür
-        if not filtered_vals:
-            return clean_vals, clean_ts
-        
-        return filtered_vals, filtered_ts
+        return clean_vals, clean_ts
+
+    def _on_chart_filter_changed(self):
+        self._chart_view_start = 0.0
+        self._chart_view_end = 1.0
+        self._chart_pan_origin = None
+        self._update_chart()
+
+    def _chart_period_label(self):
+        selected = self.chart_period.get()
+        return next(
+            (label for label, value in self.CHART_PERIOD_OPTIONS if value == selected),
+            "Geçmiş",
+        )
+
+    @staticmethod
+    def _merge_history_rows(*collections):
+        by_timestamp = {}
+        for rows in collections:
+            for timestamp, value in rows or []:
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if value > 0:
+                    by_timestamp[normalize_history_timestamp(timestamp)] = value
+        return sorted(by_timestamp.items(), key=lambda row: row[0])
+
+    def _load_selected_chart_history(self):
+        selected = self.chart_var.get()
+        period_seconds = self.chart_period.get()
+        data, source, interval = self._cached_history_series(
+            selected, period_seconds
+        )
+        self._chart_history_source = source
+        self._chart_history_interval = interval
+        return data
+
+    def _draw_chart_message(self, text):
+        self.chart_canvas.delete("all")
+        cw = max(self.chart_canvas.winfo_width(), 230)
+        ch = max(self.chart_canvas.winfo_height(), 170)
+        scale = max(1.0, min(1.5, cw / 230.0))
+        self.chart_canvas.create_text(
+            cw // 2,
+            ch // 2,
+            text=text,
+            fill=self.color_text_muted,
+            font=(self.font_family, int(10 * scale)),
+            justify="center",
+        )
 
     def _update_chart(self):
         try:
+            data = self._load_selected_chart_history()
+            instrument = self._instrument_by_key(self.chart_var.get())
+            if not data or not instrument:
+                self._chart_full_values = []
+                self._chart_full_timestamps = []
+                self._chart_instrument = instrument
+                self._draw_chart_message(
+                    "Bu aralık için henüz veri yok\nGeçmiş arka planda tamamlanıyor"
+                )
+                return
+
+            raw_values = [row[1] for row in data]
+            raw_timestamps = [row[0] for row in data]
+            values, timestamps = self._filter_outliers(
+                raw_values, raw_timestamps
+            )
+            self._chart_full_values = list(values)
+            self._chart_full_timestamps = list(timestamps)
+            self._chart_instrument = instrument
+            self._draw_chart()
+        except Exception as exc:
+            log_message(f"Chart error: {exc}")
+            self._draw_chart_message("Grafik verisi okunamadı")
+
+    def _visible_chart_rows(self):
+        rows = list(zip(self._chart_full_timestamps, self._chart_full_values))
+        if len(rows) <= 2:
+            return rows
+        parsed = [parse_history_timestamp(timestamp) for timestamp, _value in rows]
+        if (
+            all(timestamp is not None for timestamp in parsed)
+            and parsed[-1] > parsed[0]
+        ):
+            total_seconds = (parsed[-1] - parsed[0]).total_seconds()
+            start_time = parsed[0] + timedelta(
+                seconds=total_seconds * self._chart_view_start
+            )
+            end_time = parsed[0] + timedelta(
+                seconds=total_seconds * self._chart_view_end
+            )
+            visible = [
+                row for row, timestamp in zip(rows, parsed)
+                if start_time <= timestamp <= end_time
+            ]
+            if len(visible) >= 2:
+                return visible
+        last_index = len(rows) - 1
+        start_index = int(self._chart_view_start * last_index)
+        end_index = int(self._chart_view_end * last_index) + 1
+        end_index = max(start_index + 2, min(end_index, len(rows)))
+        return rows[start_index:end_index]
+
+    def _draw_chart(self):
+        try:
             self.chart_canvas.delete("all")
-            
             cw = self.chart_canvas.winfo_width()
             ch = self.chart_canvas.winfo_height()
             if cw < 10 or ch < 10:
                 cw, ch = 230, 170
-            
-            # Dinamik font boyutu hesaplama
+            if not self._chart_full_values or not self._chart_instrument:
+                self._draw_chart_message("Bu aralık için henüz veri yok")
+                return
+
+            rows = downsample_history_rows(
+                self._visible_chart_rows(),
+                max(120, int(cw * 2)),
+            )
+            if not rows:
+                self._draw_chart_message("Bu aralık için henüz veri yok")
+                return
+            timestamps = [row[0] for row in rows]
+            values = [float(row[1]) for row in rows]
+            instrument = self._chart_instrument
+            color = instrument.get("color", self.color_accent)
+
             scale = max(1.0, min(1.5, cw / 230.0))
             f_title = int(8 * scale)
             f_tick = int(6 * scale)
             f_val = int(7 * scale)
-            f_no_data = int(10 * scale)
-            
-            days = self.chart_period.get()
-            selected = self.chart_var.get()
-            source_symbol = self._history_source_symbol(selected)
-            if days == 0:
-                data = self.history_db.get_all_history(
-                    selected, source_symbol=source_symbol
-                )
-            else:
-                data = self.history_db.get_history(
-                    selected, days=days, source_symbol=source_symbol
-                )
-            
-            if not data:
-                self.chart_canvas.create_text(cw//2, ch//2, text="Henüz grafik verisi yok", fill=self.color_text_muted, font=(self.font_family, f_no_data))
-                return
-            
-            instrument = self._instrument_by_key(selected)
-            if not instrument:
-                self.chart_canvas.create_text(cw//2, ch//2, text="Henüz grafik verisi yok", fill=self.color_text_muted, font=(self.font_family, f_no_data))
-                return
-            title = instrument["label"]
-            color = instrument.get("color", self.color_accent)
-            
-            raw_values = [row[1] for row in data]
-            raw_timestamps = [row[0] for row in data]
-            
-            # Outlier filtreleme (bozuk/saçma verileri temizle)
-            values, timestamps = self._filter_outliers(raw_values, raw_timestamps)
-            
-            if not values:
-                self.chart_canvas.create_text(cw//2, ch//2, text="Henüz grafik verisi yok", fill=self.color_text_muted, font=(self.font_family, f_no_data))
-                return
-            
-            # Grafik alanı (padding) — sol taraf daha geniş, okunabilirlik için
             pad_l, pad_r, pad_t, pad_b = 48, 14, 34, 28
-            gw = cw - pad_l - pad_r
-            gh = ch - pad_t - pad_b
-            
+            gw = max(1, cw - pad_l - pad_r)
+            gh = max(1, ch - pad_t - pad_b)
+            self._chart_plot_bounds = (pad_l, pad_t, cw - pad_r, pad_t + gh)
+
             min_v = min(values)
             max_v = max(values)
-            
-            # Y ekseninde %5 marj bırak (grafik taşmasın)
-            margin = (max_v - min_v) * 0.05 if max_v != min_v else max_v * 0.02
+            margin = (
+                (max_v - min_v) * 0.05
+                if max_v != min_v
+                else max(abs(max_v) * 0.02, 0.01)
+            )
             chart_min = min_v - margin
             chart_max = max_v + margin
-            val_range = chart_max - chart_min if chart_max != chart_min else 1
-            
+            val_range = max(chart_max - chart_min, 0.000001)
+
+            zoom_pct = int(round(100 / max(
+                self._chart_view_end - self._chart_view_start, 0.001
+            )))
+            title = f"{instrument['label']} · {self._chart_period_label()}"
+            if zoom_pct > 100:
+                title += f" · %{zoom_pct}"
             self.chart_canvas.create_text(
                 pad_l,
                 15,
@@ -2825,67 +3370,204 @@ class PiyasaWidget:
                 font=(self.font_family, f_title, "bold"),
                 anchor="w",
             )
-            
-            # Grid çizgileri ve Y ekseni etiketleri
-            for i in range(5):
-                y = pad_t + int(gh * i / 4)
-                self.chart_canvas.create_line(pad_l, y, cw - pad_r, y, fill=self.color_border, dash=(2, 5))
-                v = chart_max - (val_range * i / 4)
-                if v >= 10000:
-                    fmt = f"{v:,.0f}"
-                elif v >= 100:
-                    fmt = f"{v:.1f}"
+            latest = parse_history_timestamp(timestamps[-1])
+            source_note = ""
+            if (
+                self._chart_history_source == SILVER_HISTORY_PROXY_SYMBOL
+                and instrument.get("source") in SILVER_SPOT_SOURCES
+            ):
+                source_note = "SI=F · "
+            if latest is not None:
+                self.chart_canvas.create_text(
+                    cw - pad_r,
+                    15,
+                    text=f"{source_note}{latest.strftime('%d/%m %H:%M')}",
+                    fill=self.color_text_muted,
+                    font=(self.font_family, f_tick),
+                    anchor="e",
+                )
+
+            for index in range(5):
+                y = pad_t + int(gh * index / 4)
+                self.chart_canvas.create_line(
+                    pad_l,
+                    y,
+                    cw - pad_r,
+                    y,
+                    fill=self.color_border,
+                    dash=(2, 5),
+                )
+                value = chart_max - (val_range * index / 4)
+                if value >= 10000:
+                    formatted = f"{value:,.0f}"
+                elif value >= 100:
+                    formatted = f"{value:.1f}"
                 else:
-                    fmt = f"{v:.2f}"
-                self.chart_canvas.create_text(pad_l - 6, y, text=fmt, fill=self.color_text_muted, font=(self.font_family, f_tick), anchor="e")
-            
-            # Veri noktalarını canvas koordinatlarına çevir
-            n = len(values)
+                    formatted = f"{value:.2f}"
+                self.chart_canvas.create_text(
+                    pad_l - 6,
+                    y,
+                    text=formatted,
+                    fill=self.color_text_muted,
+                    font=(self.font_family, f_tick),
+                    anchor="e",
+                )
+
+            parsed_times = [parse_history_timestamp(value) for value in timestamps]
+            use_time_axis = (
+                all(value is not None for value in parsed_times)
+                and len(parsed_times) > 1
+                and parsed_times[-1] > parsed_times[0]
+            )
+            if use_time_axis:
+                first_second = parsed_times[0].timestamp()
+                time_span = max(
+                    parsed_times[-1].timestamp() - first_second,
+                    1,
+                )
+
             points = []
-            for i, v in enumerate(values):
-                x = pad_l + int(gw * i / max(n - 1, 1))
-                y = pad_t + int(gh * (1 - (v - chart_min) / val_range))
+            for index, value in enumerate(values):
+                if use_time_axis:
+                    ratio = (
+                        parsed_times[index].timestamp() - first_second
+                    ) / time_span
+                else:
+                    ratio = index / max(len(values) - 1, 1)
+                x = pad_l + int(gw * ratio)
+                y = pad_t + int(
+                    gh * (1 - (value - chart_min) / val_range)
+                )
                 points.append((x, y))
-            
-            # A light stippled area preserves depth without adding animation.
+
             if len(points) >= 2:
-                fill_points = list(points) + [(points[-1][0], pad_t + gh), (points[0][0], pad_t + gh)]
-                flat = [coord for p in fill_points for coord in p]
-                self.chart_canvas.create_polygon(flat, fill=color, stipple="gray12", outline="")
-            
-            # Çizgi
-            if len(points) >= 2:
-                flat_line = [coord for p in points for coord in p]
-                self.chart_canvas.create_line(flat_line, fill=color, width=2, smooth=True, splinesteps=12)
-            
-            # X ekseni etiketleri
-            label_count = min(4, n)
-            for i in range(label_count):
-                idx = int(i * (n - 1) / max(label_count - 1, 1))
-                x = points[idx][0]
-                ts = timestamps[idx]
-                try:
-                    dt = datetime.fromisoformat(ts)
-                    if n > 1:
-                        span = (datetime.fromisoformat(timestamps[-1]) - datetime.fromisoformat(timestamps[0])).days
-                        label = dt.strftime("%H:%M") if span <= 2 else dt.strftime("%d/%m")
-                    else:
-                        label = dt.strftime("%d/%m")
-                except:
-                    label = str(ts)[:5]
-                self.chart_canvas.create_text(x, ch - 10, text=label, fill=self.color_text_muted, font=(self.font_family, f_tick))
-            
-            # Son değer etiketi
+                fill_points = list(points) + [
+                    (points[-1][0], pad_t + gh),
+                    (points[0][0], pad_t + gh),
+                ]
+                self.chart_canvas.create_polygon(
+                    [coord for point in fill_points for coord in point],
+                    fill=color,
+                    stipple="gray12",
+                    outline="",
+                )
+                self.chart_canvas.create_line(
+                    [coord for point in points for coord in point],
+                    fill=color,
+                    width=2,
+                )
+
+            label_count = min(4, len(points))
+            visible_span = (
+                parsed_times[-1] - parsed_times[0]
+                if use_time_axis
+                else timedelta(0)
+            )
+            for index in range(label_count):
+                point_index = int(
+                    index * (len(points) - 1) / max(label_count - 1, 1)
+                )
+                parsed = parsed_times[point_index]
+                if parsed is None:
+                    label = str(timestamps[point_index])[:10]
+                elif visible_span <= timedelta(days=2):
+                    label = parsed.strftime("%H:%M")
+                elif visible_span <= timedelta(days=45):
+                    label = parsed.strftime("%d/%m")
+                else:
+                    label = parsed.strftime("%m/%Y")
+                self.chart_canvas.create_text(
+                    points[point_index][0],
+                    ch - 10,
+                    text=label,
+                    fill=self.color_text_muted,
+                    font=(self.font_family, f_tick),
+                )
+
             last_x, last_y = points[-1]
-            last_v = values[-1]
-            fmt_v = format_instrument_value(instrument, last_v)
-            self.chart_canvas.create_oval(last_x-3, last_y-3, last_x+3, last_y+3, fill=color, outline=self.color_card, width=1)
-            # Etiketi grafik sınırları içinde tut
-            label_y = max(last_y - 12, pad_t + 5)
-            self.chart_canvas.create_text(last_x, label_y, text=fmt_v, fill=color, font=(self.font_family, f_val, "bold"))
-            
-        except Exception as e:
-            log_message(f"Chart error: {e}")
+            last_value = values[-1]
+            self.chart_canvas.create_oval(
+                last_x - 3,
+                last_y - 3,
+                last_x + 3,
+                last_y + 3,
+                fill=color,
+                outline=self.color_card,
+                width=1,
+            )
+            self.chart_canvas.create_text(
+                min(last_x - 5, cw - pad_r - 2),
+                max(last_y - 12, pad_t + 5),
+                text=format_instrument_value(instrument, last_value),
+                fill=color,
+                font=(self.font_family, f_val, "bold"),
+                anchor="e",
+            )
+        except Exception as exc:
+            log_message(f"Chart draw error: {exc}")
+
+    def reset_chart_view(self, event=None):
+        self._chart_view_start = 0.0
+        self._chart_view_end = 1.0
+        self._chart_pan_origin = None
+        self._draw_chart()
+        return "break" if event is not None else None
+
+    def _zoom_chart(self, zoom_in, anchor=0.5):
+        point_count = len(self._chart_full_values)
+        if point_count < 3:
+            return
+        min_span = max(2 / max(point_count - 1, 1), 0.01)
+        self._chart_view_start, self._chart_view_end = calculate_zoomed_range(
+            self._chart_view_start,
+            self._chart_view_end,
+            zoom_in,
+            anchor,
+            min_span,
+        )
+        self._draw_chart()
+
+    def _on_chart_mousewheel(self, event, delta=None):
+        delta = delta if delta is not None else getattr(event, "delta", 0)
+        left, _top, right, _bottom = self._chart_plot_bounds
+        width = max(right - left, 1)
+        anchor = (getattr(event, "x", left + width / 2) - left) / width
+        self._zoom_chart(delta > 0, anchor)
+        return "break"
+
+    def _on_chart_pan_start(self, event):
+        self._chart_pan_origin = (
+            event.x,
+            self._chart_view_start,
+            self._chart_view_end,
+        )
+        self.chart_canvas.configure(cursor="fleur")
+        return "break"
+
+    def _on_chart_pan_motion(self, event):
+        if self._chart_pan_origin is None:
+            return "break"
+        origin_x, start, end = self._chart_pan_origin
+        left, _top, right, _bottom = self._chart_plot_bounds
+        width = max(right - left, 1)
+        span = end - start
+        shift = -((event.x - origin_x) / width) * span
+        self._chart_view_start, self._chart_view_end = calculate_panned_range(
+            start,
+            end,
+            shift,
+        )
+        self._draw_chart()
+        return "break"
+
+    def _on_chart_pan_end(self, _event=None):
+        self._chart_pan_origin = None
+        self.chart_canvas.configure(cursor="hand2")
+        return "break"
+
+    def _on_chart_canvas_configure(self, _event=None):
+        if self._chart_full_values:
+            self._draw_chart()
 
     # --- İstatistik Sayfası ---
     def _build_stats_page(self):
@@ -3019,7 +3701,6 @@ class PiyasaWidget:
     def _update_stats(self):
         try:
             days = self.stats_period.get()
-            days_param = days if days > 0 else None
 
             for instrument in self.watchlist:
                 key = instrument["key"]
@@ -3027,38 +3708,33 @@ class PiyasaWidget:
                 if not labels:
                     continue
 
-                source_symbol = self._history_source_symbol(key)
-                stats = self.history_db.get_stats(
-                    key, days=days_param, source_symbol=source_symbol
+                rows, _source, _interval = self._cached_history_series(
+                    key,
+                    days * 24 * 60 * 60 if days > 0 else 0,
                 )
-                first_last = self.history_db.get_first_last(
-                    key, days=days_param, source_symbol=source_symbol
-                )
-
-                if not stats or stats[3] == 0:
+                values = [float(row[1]) for row in rows]
+                if not values:
                     labels["min"].config(text="Min: --")
                     labels["max"].config(text="Max: --")
                     labels["avg"].config(text="Ort: --")
                     labels["chg"].config(text="Değişim: --", fg=self.color_text_muted)
                     continue
 
-                mn, mx, avg = stats[0], stats[1], stats[2]
+                mn, mx = min(values), max(values)
+                avg = sum(values) / len(values)
                 labels["min"].config(text=f"Min: {format_instrument_value(instrument, mn)}")
                 labels["max"].config(text=f"Max: {format_instrument_value(instrument, mx)}")
                 labels["avg"].config(text=f"Ort: {format_instrument_value(instrument, avg)}")
 
-                # Değişim %
-                first, last = first_last
-                if first and last:
-                    first_value = first[0]
-                    last_value = last[0]
-                    if first_value and first_value != 0:
-                        chg = ((last_value - first_value) / first_value) * 100
-                        sign = "+" if chg >= 0 else ""
-                        color = self.color_success if chg >= 0 else self.color_danger
-                        labels["chg"].config(text=f"Değişim: {sign}{chg:.1f}%", fg=color)
-                    else:
-                        labels["chg"].config(text="Değişim: --", fg=self.color_text_muted)
+                first_value = values[0]
+                last_value = values[-1]
+                if first_value > 0:
+                    chg = ((last_value - first_value) / first_value) * 100
+                    sign = "+" if chg >= 0 else ""
+                    color = self.color_success if chg >= 0 else self.color_danger
+                    labels["chg"].config(text=f"Değişim: {sign}{chg:.1f}%", fg=color)
+                else:
+                    labels["chg"].config(text="Değişim: --", fg=self.color_text_muted)
         except Exception as e:
             log_message(f"Stats error: {e}")
 
@@ -3194,6 +3870,211 @@ class PiyasaWidget:
             instrument["key"]: instrument["symbol"]
             for instrument in self.watchlist
         }
+
+    @staticmethod
+    def _history_provider_symbol(instrument):
+        if instrument.get("source") in SILVER_SPOT_SOURCES:
+            return SILVER_HISTORY_PROXY_SYMBOL
+        return instrument.get("symbol")
+
+    @staticmethod
+    def _combine_history_with_fx(base_rows, fx_rows, interval="1d"):
+        """Convert ounce/USD rows to gram/TRY using the latest known FX row."""
+        parsed_fx = []
+        for timestamp, value in fx_rows or []:
+            parsed = parse_history_timestamp(timestamp)
+            if parsed is not None:
+                parsed_fx.append((parsed, float(value)))
+        parsed_fx.sort(key=lambda item: item[0])
+        if not parsed_fx:
+            return []
+
+        max_fx_age = (
+            timedelta(minutes=15)
+            if interval == "5m"
+            else timedelta(days=4)
+        )
+        combined = []
+        fx_index = 0
+        latest_fx = None
+        for timestamp, value in base_rows or []:
+            parsed = parse_history_timestamp(timestamp)
+            if parsed is None:
+                continue
+            while (
+                fx_index < len(parsed_fx)
+                and parsed_fx[fx_index][0] <= parsed
+            ):
+                latest_fx = parsed_fx[fx_index]
+                fx_index += 1
+            if latest_fx is None:
+                continue
+            if parsed - latest_fx[0] > max_fx_age:
+                continue
+            converted = (float(value) * latest_fx[1]) / TROY_OUNCE_GRAMS
+            if converted > 0:
+                combined.append((normalize_history_timestamp(parsed), converted))
+        return combined
+
+    @staticmethod
+    def _history_rows_for_instrument(instrument, raw_series, interval="1d"):
+        provider_symbol = PiyasaWidget._history_provider_symbol(instrument)
+        base_rows = raw_series.get(provider_symbol, [])
+        source = instrument.get("source")
+        if source in ("metal_try", "silver_spot_try"):
+            return PiyasaWidget._combine_history_with_fx(
+                base_rows,
+                raw_series.get("TRY=X", []),
+                interval,
+            )
+        return list(base_rows)
+
+    @staticmethod
+    def _history_cache_source(instrument):
+        if instrument.get("source") in SILVER_SPOT_SOURCES:
+            return SILVER_HISTORY_PROXY_SYMBOL
+        return instrument.get("symbol") or ""
+
+    @staticmethod
+    def _extract_history_rows(frame):
+        if frame is None or getattr(frame, "empty", True):
+            return []
+        try:
+            close = frame["Close"].dropna()
+        except Exception:
+            return []
+        rows = []
+        for timestamp, value in close.items():
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if value > 0 and value == value:
+                rows.append((normalize_history_timestamp(timestamp), value))
+        return rows
+
+    def _download_yahoo_history(self, symbol, interval):
+        kwargs = {
+            "interval": interval,
+            "auto_adjust": True,
+            "actions": False,
+            "repair": True,
+            "timeout": 15,
+        }
+        if interval == "5m":
+            end = datetime.now().astimezone()
+            kwargs.update(start=end - timedelta(days=31), end=end)
+        else:
+            kwargs["period"] = "max"
+        frame = yf.Ticker(symbol).history(**kwargs)
+        return self._extract_history_rows(frame)
+
+    def _sync_history_profile(self, interval, max_age):
+        due_instruments = []
+        for instrument in list(self.watchlist):
+            source_symbol = self._history_cache_source(instrument)
+            if self.history_db.history_sync_due(
+                instrument["key"],
+                source_symbol,
+                interval,
+                max_age,
+            ):
+                due_instruments.append(instrument)
+        if not due_instruments:
+            return 0
+
+        required_symbols = {
+            self._history_provider_symbol(instrument)
+            for instrument in due_instruments
+            if self._history_provider_symbol(instrument)
+        }
+        if any(
+            instrument.get("source") in ("metal_try", "silver_spot_try")
+            for instrument in due_instruments
+        ):
+            required_symbols.add("TRY=X")
+
+        raw_series = {}
+        for symbol in sorted(required_symbols):
+            if self._stop_event.is_set():
+                return 0
+            try:
+                raw_series[symbol] = self._download_yahoo_history(
+                    symbol, interval
+                )
+            except Exception as exc:
+                log_message(
+                    f"{symbol} {interval} geçmiş verisi alınamadı: {exc}"
+                )
+                raw_series[symbol] = []
+
+        inserted = 0
+        for instrument in due_instruments:
+            rows = self._history_rows_for_instrument(
+                instrument, raw_series, interval
+            )
+            if not rows:
+                continue
+            source_symbol = self._history_cache_source(instrument)
+            inserted += self.history_db.insert_history_rows(
+                instrument,
+                rows,
+                interval,
+                source_symbol=source_symbol,
+            )
+            self.history_db.mark_history_synced(
+                instrument["key"],
+                source_symbol,
+                interval,
+            )
+        return inserted
+
+    def sync_historical_data(self):
+        """Fill missing intraday/daily history without blocking the Tk thread."""
+        if not self._history_fetch_lock.acquire(blocking=False):
+            return 0
+        inserted = 0
+        try:
+            inserted = self._sync_history_profile("5m", timedelta(minutes=30))
+            if not self._stop_event.is_set():
+                inserted += self._sync_history_profile("1d", timedelta(hours=24))
+            if inserted and hasattr(self, "root"):
+                try:
+                    self.root.after(0, self._refresh_history_views)
+                except tk.TclError:
+                    pass
+        except Exception as exc:
+            log_message(f"Geçmiş veri eşitleme hatası: {exc}")
+        finally:
+            self._history_fetch_lock.release()
+        return inserted
+
+    def _history_backfill_worker(self):
+        while not self._stop_event.is_set():
+            self._history_resync_requested = False
+            self.sync_historical_data()
+            if not self._history_resync_requested:
+                break
+
+    def request_history_backfill(self):
+        active = getattr(self, "_history_thread", None)
+        if active is not None and active.is_alive():
+            self._history_resync_requested = True
+            return active
+        self._history_resync_requested = False
+        self._history_thread = threading.Thread(
+            target=self._history_backfill_worker,
+            name="market-history-backfill",
+            daemon=True,
+        )
+        self._history_thread.start()
+        return self._history_thread
+
+    def _refresh_history_views(self):
+        if self._last_prices:
+            self._update_price_row_visuals(self._last_prices)
+        if getattr(self, "current_page", 0) == 1:
+            self._update_chart()
 
     def _compatible_cached_data(self, data):
         data = normalize_market_data(data)
@@ -3389,6 +4270,7 @@ class PiyasaWidget:
             return
 
         prices = data.get("prices", {})
+        self._last_prices = dict(prices)
         for instrument in self.watchlist:
             var = getattr(self, "price_vars", {}).get(instrument["key"])
             if var:
@@ -3480,13 +4362,12 @@ class PiyasaWidget:
         if last_data:
             self.guncelle_arayuz(last_data)
         self.request_data_refresh()
+        self.request_history_backfill()
 
     def open_settings(self, event=None):
-        # Menüyü fare konumunda aç
-        x = self.root.winfo_pointerx()
-        y = self.root.winfo_pointery()
-        self.settings_menu.tk_popup(x, y)
-        self.settings_menu.grab_release()
+        anchor = getattr(self, "footer_buttons", {}).get("settings")
+        if anchor is not None:
+            self.settings_menu.toggle_for_widget(anchor)
         
     def make_toolwindow(self):
         # Windows API kullanarak pencereyi Taskbar'dan ve Alt-Tab'dan gizleme
@@ -3505,8 +4386,13 @@ class PiyasaWidget:
         self.root.after(10, self.root.deiconify)
 
     def veri_dongusu(self):
+        next_history_sync = 0.0
         while not self._stop_event.is_set():
             self.veri_getir()
+            now = time.monotonic()
+            if now >= next_history_sync and not self._stop_event.is_set():
+                self.request_history_backfill()
+                next_history_sync = now + (30 * 60)
             self._stop_event.wait(self.refresh_rate)
 
 
