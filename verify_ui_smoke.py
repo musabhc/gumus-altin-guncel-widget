@@ -54,6 +54,10 @@ class IsolatedTkSmokeTest(unittest.TestCase):
             return
         try:
             if widget.winfo_exists():
+                # Tk's after queue outlives the Python callbacks destroyed with
+                # each test window. Cancel it before discarding the interpreter.
+                for after_id in widget.tk.call("after", "info"):
+                    widget.after_cancel(after_id)
                 widget.destroy()
         except tk.TclError:
             pass
@@ -160,14 +164,14 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         selected_key = self.app.watchlist[-1]["key"]
         click = SimpleNamespace(x_root=120, y_root=240)
 
-        self.assertEqual(self.app.ROW_DRAG_HOLD_MS, 1000)
+        self.assertEqual(self.app.ROW_DRAG_HOLD_MS, 350)
         with patch.object(
             self.app.root,
             "after",
             wraps=self.app.root.after,
         ) as schedule:
-            self.assertIsNone(self.app._on_price_row_press(click, selected_key))
-        self.assertEqual(schedule.call_args.args[0], 1000)
+            self.assertEqual(self.app._on_price_row_press(click, selected_key), "break")
+        self.assertEqual(schedule.call_args.args[0], 350)
         self.assertIsNotNone(self.app._row_hold_after_id)
         self.assertEqual(
             self.app._on_price_row_release(click, selected_key),
@@ -179,7 +183,7 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         self.assertIsNone(self.app._row_hold_after_id)
         self.assertIsNone(self.app._row_press_key)
 
-    def test_price_row_early_motion_does_not_open_chart(self):
+    def test_price_row_early_motion_starts_reordering_without_moving_window(self):
         self._require_tk()
         self._build_piyasa_widget()
 
@@ -188,10 +192,12 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         press = SimpleNamespace(x_root=120, y_root=240)
         moved = SimpleNamespace(x_root=127, y_root=240)
 
-        self.assertIsNone(self.app._on_price_row_press(press, selected_key))
-        self.assertIsNone(self.app._on_price_row_motion(moved, selected_key))
-        self.assertIsNone(self.app._row_press_key)
-        self.assertIsNone(self.app._on_price_row_release(moved, selected_key))
+        original_geometry = self.app.root.geometry()
+        self.assertEqual(self.app._on_price_row_press(press, selected_key), "break")
+        self.assertEqual(self.app._on_price_row_motion(moved, selected_key), "break")
+        self.assertEqual(self.app._row_drag_key, selected_key)
+        self.assertEqual(self.app._on_price_row_release(moved, selected_key), "break")
+        self.assertEqual(self.app.root.geometry(), original_geometry)
 
         self.assertEqual(self.app.chart_var.get(), initial_chart_key)
         self.assertEqual(self.app.current_page, 0)
@@ -205,7 +211,7 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         final_order = original_order[1:] + [dragged_key]
         press = SimpleNamespace(x_root=120, y_root=240)
 
-        self.assertIsNone(self.app._on_price_row_press(press, dragged_key))
+        self.assertEqual(self.app._on_price_row_press(press, dragged_key), "break")
         self.app.root.after_cancel(self.app._row_hold_after_id)
         self.app._row_hold_after_id = None
         self.app._activate_price_row_drag(dragged_key)
@@ -310,8 +316,13 @@ class IsolatedTkSmokeTest(unittest.TestCase):
                 for item in self.app.settings_menu.items
             ],
             [
+                ("command", "Portföyü yönet"),
+                ("command", "İşlemleri içe aktar"),
+                ("separator", None),
                 ("check", "Windows ile başlat"),
                 ("check", "Her zaman üstte"),
+                ("separator", None),
+                ("choice", "Mini grafik zaman aralığı"),
                 ("separator", None),
                 ("command", "İzlenenleri düzenle"),
                 ("command", "Güncellemeleri kontrol et"),
@@ -327,6 +338,126 @@ class IsolatedTkSmokeTest(unittest.TestCase):
             self.app.settings_menu.body.cget("bg"),
             main.THEME["surface_alt"],
         )
+
+    def test_all_price_row_surfaces_capture_drag_events(self):
+        self._require_tk()
+        self._build_piyasa_widget()
+        self.app.root.deiconify()
+        self.app.root.update()
+        key = self.app.watchlist[0]["key"]
+        row = self.app.price_row_widgets[key]
+        window_events = []
+        for sequence in ("<ButtonPress-1>", "<B1-Motion>", "<ButtonRelease-1>"):
+            self.app.root.bind(sequence, lambda event: window_events.append(event.type), add="+")
+        original_position = (self.app.root.winfo_x(), self.app.root.winfo_y())
+        for target in (row, *row.winfo_children()):
+            with self.subTest(target=target.winfo_class()):
+                x, y = target.winfo_rootx() + 2, target.winfo_rooty() + 2
+                target.event_generate("<ButtonPress-1>", x=2, y=2, rootx=x, rooty=y)
+                target.event_generate("<B1-Motion>", x=10, y=2, rootx=x + 8, rooty=y)
+                self.assertEqual(self.app._row_drag_key, key)
+                target.event_generate("<ButtonRelease-1>", x=10, y=2, rootx=x + 8, rooty=y)
+                self.assertIsNone(self.app._row_drag_key)
+                self.assertEqual((self.app.root.winfo_x(), self.app.root.winfo_y()), original_position)
+        self.assertEqual(window_events, [])
+        original_order = [item["key"] for item in self.app.watchlist]
+        last_row = self.app.price_row_widgets[original_order[-1]]
+        target = self.app.price_spark_canvases[key]
+        x, y = target.winfo_rootx() + 2, target.winfo_rooty() + 2
+        end_y = last_row.winfo_rooty() + last_row.winfo_height() + 5
+        target.event_generate("<ButtonPress-1>", x=2, y=2, rootx=x, rooty=y)
+        target.event_generate("<B1-Motion>", x=2, y=end_y-y, rootx=x, rooty=end_y)
+        target.event_generate("<ButtonRelease-1>", x=2, y=end_y-y, rootx=x, rooty=end_y)
+        expected = original_order[1:] + [key]
+        self.assertEqual([item["key"] for item in self.app.watchlist], expected)
+        reloaded = main.WatchlistManager(self.app.watchlist_manager.filepath)
+        self.assertEqual([item["key"] for item in reloaded.instruments], expected)
+        self.assertEqual((self.app.root.winfo_x(), self.app.root.winfo_y()), original_position)
+
+    def test_mini_chart_period_applies_to_line_and_change_and_survives_reload(self):
+        self._require_tk()
+        self._build_piyasa_widget()
+        self.assertEqual(self.app.sparkline_period.get(), 86400)
+        main_chart_period = self.app.chart_period.get()
+        for _label, seconds in self.app.CHART_PERIOD_OPTIONS:
+            self.app.sparkline_period_control.select(seconds)
+            with patch.object(self.app, "_cached_history_series", return_value=(
+                [("2026-10-23 12:00:00", 100), ("2026-10-24 12:00:00", 125)], "test", "5m"
+            )) as history:
+                self.assertEqual(self.app._get_sparkline_values("thyao", 125), [100, 125])
+                self.assertEqual(self.app._get_change_pct("thyao", 125), 25)
+                self.assertEqual([call.args for call in history.call_args_list],
+                                 [("thyao", seconds), ("thyao", seconds)])
+            self.assertEqual(self.app._load_preferences()["sparkline_period"], seconds)
+        self.assertEqual(self.app.chart_period.get(), main_chart_period)
+        self.assert_temp_path(self.app.preferences_path)
+        with open(self.app.preferences_path, "w", encoding="utf-8") as target:
+            json.dump({"sparkline_period": 999}, target)
+        self.assertEqual(self.app._load_preferences()["sparkline_period"], 86400)
+
+    def test_header_alignment_and_footer_labels(self):
+        self._require_tk()
+        self._build_piyasa_widget()
+        self.app.root.deiconify()
+        self.app.root.update()
+        for width in (368, 480):
+            self.app.root.geometry(f"{width}x600")
+            self.app.root.update()
+            widgets = (self.app.btn_prev, self.app.lbl_time, self.app.btn_next,
+                       self.app.lbl_market_status, self.app.lbl_market_label)
+            centers = [widget.winfo_rooty() + widget.winfo_height() / 2 for widget in widgets]
+            self.assertLessEqual(max(centers) - min(centers), 1)
+        self.assertEqual(set(self.app.footer_buttons), {"settings", "refresh"})
+        self.assertEqual(self.app.footer_buttons["refresh"].label, "Yenile")
+        self.assertEqual(self.app.footer_buttons["settings"].label, "Ayarlar")
+        self.app.root.attributes("-topmost", True)
+        self.app.open_settings()
+        self.app.root.update()
+        self.assertTrue(self.app.settings_menu.winfo_viewable())
+        self.assertTrue(self.app.settings_menu.attributes("-topmost"))
+
+    def test_transaction_headers_cycle_sort_and_preserve_record_identity(self):
+        self._require_tk()
+        self.root = tk.Tk()
+        self.root.withdraw()
+        manager = main.TransactionManager(os.path.join(self.temp_dir.name, "transactions.json"))
+        records = [
+            ("31-12-2025", "thyao", "buy", 10, 100),
+            ("02-01-2026", "thyao", "buy", 2, 900),
+            ("15-01-2026", "gumus_tl", "buy", 100, 20),
+            ("02-01-2026", "thyao", "sell", 2, 500),
+        ]
+        for date, key, action, quantity, total in records:
+            manager.save({"date": date, "instrument_key": key, "action": action,
+                          "quantity": quantity, "currency": "TL", "total_tl": total})
+        self.dialog = main.PortfolioManagerDialog(self.root, manager, lambda: None, 40, main.default_watchlist())
+        self.dialog.withdraw()
+        self.assertTrue(self.dialog.overrideredirect())
+        original = copy.deepcopy(manager.transactions)
+        expected = {"date": ([0, 1, 3, 2], [2, 1, 3, 0]),
+                    "action": ([0, 1, 2, 3], [3, 0, 1, 2]),
+                    "asset": ([2, 0, 1, 3], [0, 1, 3, 2]),
+                    "amount": ([1, 3, 0, 2], [2, 0, 1, 3]),
+                    "total": ([2, 0, 3, 1], [1, 3, 0, 2])}
+        for column, (ascending, descending) in expected.items():
+            for order in (ascending, descending, [0, 1, 2, 3]):
+                self.dialog.tree.heading_buttons[column].invoke()
+                self.assertEqual([row["source_index"] for row in self.dialog.tree.rows], order)
+        self.dialog.tree.heading_buttons["amount"].invoke()
+        self.dialog.tree.heading_buttons["total"].invoke()
+        self.assertEqual(self.dialog.sort_direction, 1)
+        self.dialog.start_edit(str(self.dialog.tree.rows[0]["source_index"]))
+        self.assertEqual(self.dialog.edit_index, 2)
+        self.assertEqual(self.dialog.var_instrument.get(), "Gümüş TL")
+        self.dialog.cancel_edit()
+        self.dialog.var_asset_filter.set("THYAO")
+        self.dialog.load_list()
+        self.assertEqual([row["source_index"] for row in self.dialog.tree.rows], [0, 3, 1])
+        self.dialog.tree.heading_buttons["total"].invoke()
+        self.assertEqual([row["source_index"] for row in self.dialog.tree.rows], [1, 3, 0])
+        self.dialog.tree.heading_buttons["total"].invoke()
+        self.assertEqual([row["source_index"] for row in self.dialog.tree.rows], [0, 1, 3])
+        self.assertEqual(manager.transactions, original)
 
     def test_portfolio_dialog_search_filter_and_source_indices(self):
         self._require_tk()

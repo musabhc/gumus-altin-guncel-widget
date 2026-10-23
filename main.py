@@ -1218,6 +1218,8 @@ class PortfolioManagerDialog(tk.Toplevel):
         self.instrument_by_key = {item["key"]: item for item in self.instruments}
         self.instrument_label_to_key = {item["label"]: item["key"] for item in self.instruments}
         self.edit_index = None
+        self.sort_column = None
+        self.sort_direction = 0
         self._form_scroll_after_id = None
         self.bg_color = THEME["background"]
         self.color_card = THEME["surface"]
@@ -1245,6 +1247,9 @@ class PortfolioManagerDialog(tk.Toplevel):
         self.geometry("1120x760")
         self.minsize(980, 700)
         self.configure(bg=self.bg_color)
+        self.overrideredirect(True)
+        self.transient(parent)
+        self.bind("<Escape>", lambda _event: self.destroy())
         configure_ttk_styles(self)
 
         self.grid_rowconfigure(1, weight=1)
@@ -1258,22 +1263,35 @@ class PortfolioManagerDialog(tk.Toplevel):
             padx=SPACING["xl"],
             pady=(SPACING["lg"], SPACING["md"]),
         )
-        tk.Label(
+        self.close_button = IconButton(header, "close", self.destroy, size=30,
+                                       bg=self.bg_color, danger=True, show_border=False)
+        self.close_button.pack(side="right", anchor="n")
+        title_label = tk.Label(
             header,
             text="Portföy Yönetimi",
             bg=self.bg_color,
             fg=THEME["text_primary"],
             font=font(self, "title", "bold"),
             anchor="w",
-        ).pack(anchor="w")
-        tk.Label(
+        )
+        title_label.pack(anchor="w")
+        subtitle_label = tk.Label(
             header,
             text="Alım ve satış işlemlerinizi tek yerden görüntüleyin ve yönetin.",
             bg=self.bg_color,
             fg=THEME["text_secondary"],
             font=font(self, "body"),
             anchor="w",
-        ).pack(anchor="w", pady=(SPACING["xxs"], 0))
+        )
+        subtitle_label.pack(anchor="w", pady=(SPACING["xxs"], 0))
+        for handle in (header, title_label, subtitle_label):
+            handle.bind("<ButtonPress-1>", self._start_window_move)
+            handle.bind("<B1-Motion>", self._move_window)
+        self.resize_grip = tk.Label(self, text="◢", bg=self.bg_color,
+                                    fg=self.color_text_muted, cursor="sizing")
+        self.resize_grip.place(relx=1, rely=1, anchor="se")
+        self.resize_grip.bind("<ButtonPress-1>", self._start_window_resize)
+        self.resize_grip.bind("<B1-Motion>", self._resize_window)
 
         content = tk.Frame(self, bg=self.bg_color)
         content.grid(
@@ -1364,7 +1382,8 @@ class PortfolioManagerDialog(tk.Toplevel):
         )
         table_border.grid_rowconfigure(0, weight=1)
         table_border.grid_columnconfigure(0, weight=1)
-        self.tree = TransactionTable(table_border, self.start_edit, self.delete_transaction)
+        self.tree = TransactionTable(table_border, self.start_edit, self.delete_transaction,
+                                     on_sort=self.cycle_sort)
         self.tree.grid(row=0, column=0, sticky="nsew")
 
         history_footer = tk.Frame(left_frame, bg=self.color_card)
@@ -1553,6 +1572,20 @@ class PortfolioManagerDialog(tk.Toplevel):
         self._search_trace_id = self.var_search.trace_add("write", self._on_search_changed)
         self.load_list()
 
+    def _start_window_move(self, event):
+        self._window_move_origin = (event.x_root - self.winfo_x(), event.y_root - self.winfo_y())
+
+    def _move_window(self, event):
+        dx, dy = self._window_move_origin
+        self.geometry(f"{event.x_root - dx:+d}{event.y_root - dy:+d}")
+
+    def _start_window_resize(self, event):
+        self._window_resize_origin = (event.x_root, event.y_root, self.winfo_width(), self.winfo_height())
+
+    def _resize_window(self, event):
+        x, y, width, height = self._window_resize_origin
+        self.geometry(f"{max(980, width + event.x_root - x)}x{max(700, height + event.y_root - y)}")
+
     def selected_instrument(self):
         key = self.instrument_label_to_key.get(self.var_instrument.get())
         return self.instrument_by_key.get(key)
@@ -1668,7 +1701,28 @@ class PortfolioManagerDialog(tk.Toplevel):
             "amount": quantity_text,
             "total": total_text,
             "searchable": searchable,
+            "sort_values": {
+                "date": self._sortable_date(transaction["date"]),
+                "action": action_text.casefold(),
+                "asset": str(label).casefold(),
+                "amount": transaction["quantity"],
+                "total": raw_total,
+            },
         }
+
+    @staticmethod
+    def _sortable_date(value):
+        try:
+            return datetime.strptime(str(value), "%d-%m-%Y")
+        except ValueError:
+            return datetime.min
+
+    def cycle_sort(self, column):
+        if column not in ("date", "action", "asset", "amount", "total"):
+            return
+        self.sort_direction = (self.sort_direction + 1) % 3 if self.sort_column == column else 1
+        self.sort_column = column if self.sort_direction else None
+        self.load_list()
 
     def _refresh_asset_filter_values(self):
         labels = []
@@ -1712,6 +1766,10 @@ class PortfolioManagerDialog(tk.Toplevel):
     def load_list(self):
         self._refresh_asset_filter_values()
         rows = self._filtered_transaction_rows()
+        if self.sort_column and self.sort_direction:
+            rows.sort(key=lambda row: row["sort_values"][self.sort_column],
+                      reverse=self.sort_direction == 2)
+        self.tree.set_sort_indicator(self.sort_column, self.sort_direction)
         self.tree.set_rows(rows)
 
         total = len(self.manager.transactions)
@@ -2124,7 +2182,7 @@ class WatchlistDialog(tk.Toplevel):
 
 
 class PiyasaWidget:
-    ROW_DRAG_HOLD_MS = 1000
+    ROW_DRAG_HOLD_MS = 350
     ROW_DRAG_MOVE_TOLERANCE_PX = 6
     DEFAULT_WIDGET_WIDTH = 368
     DEFAULT_WIDGET_HEIGHT = 536
@@ -2212,6 +2270,9 @@ class PiyasaWidget:
         self._row_drag_order = None
         self._row_drag_original_order = None
         self.price_row_widgets = {}
+        self.preferences_path = os.path.join(APP_DIR, "preferences.json")
+        self._preferences = self._load_preferences()
+        self.sparkline_period = tk.IntVar(master=self.root, value=self._preferences["sparkline_period"])
         
         # UI Elemanları
         self.setup_ui()
@@ -2239,7 +2300,10 @@ class PiyasaWidget:
         # Ayarlar Menüsü (çark simgesi)
         self.var_autostart = tk.BooleanVar(value=self.asm.is_enabled())
         self.var_topmost = tk.BooleanVar(value=self.default_topmost)
-        self.settings_menu = ThemedPopupMenu(self.root)
+        self.settings_menu = ThemedPopupMenu(self.root, width=340)
+        self.settings_menu.add_command(label="Portföyü yönet", command=self.open_add_transaction)
+        self.settings_menu.add_command(label="İşlemleri içe aktar", command=self.import_transactions)
+        self.settings_menu.add_separator()
         self.settings_menu.add_checkbutton(
             label="Windows ile başlat",
             variable=self.var_autostart,
@@ -2249,6 +2313,14 @@ class PiyasaWidget:
             label="Her zaman üstte",
             variable=self.var_topmost,
             command=self.toggle_topmost,
+        )
+        self.settings_menu.add_separator()
+        self.sparkline_period_control = self.settings_menu.add_choice(
+            label="Mini grafik zaman aralığı",
+            variable=self.sparkline_period,
+            options=(("30 dk", 1800), ("1 sa", 3600), ("6 sa", 21600), ("12 sa", 43200),
+                     ("24 sa", 86400), ("7 gün", 604800), ("30 gün", 2592000), ("Tümü", 0)),
+            command=self._on_sparkline_period_changed,
         )
         self.settings_menu.add_separator()
         self.settings_menu.add_command(
@@ -2270,6 +2342,28 @@ class PiyasaWidget:
         self.update_thread = threading.Thread(target=self.veri_dongusu, daemon=True)
         self.update_thread.start()
         
+    def _load_preferences(self):
+        try:
+            with open(self.preferences_path, "r", encoding="utf-8") as source:
+                preferences = json.load(source)
+            if not isinstance(preferences, dict):
+                preferences = {}
+        except (OSError, ValueError):
+            preferences = {}
+        allowed = {value for _label, value in self.CHART_PERIOD_OPTIONS}
+        if preferences.get("sparkline_period") not in allowed:
+            preferences["sparkline_period"] = 86400
+        return preferences
+
+    def _on_sparkline_period_changed(self):
+        self._preferences["sparkline_period"] = self.sparkline_period.get()
+        try:
+            with open(self.preferences_path, "w", encoding="utf-8") as target:
+                json.dump(self._preferences, target, ensure_ascii=False, indent=2)
+        except OSError as exc:
+            log_message(f"Grafik ayarı kaydedilemedi: {exc}")
+        self._refresh_history_views()
+
     def setup_ui(self):
         """Build the compact desktop widget without changing its state contract."""
         configure_ttk_styles(self.root)
@@ -2346,16 +2440,17 @@ class PiyasaWidget:
         status_frame = tk.Frame(header_frame, bg=self.bg_color)
         status_frame.pack(side="left", fill="x", expand=True)
 
-        self.var_market_status = tk.StringVar(value="•")
+        self.var_market_status = tk.StringVar(value="●")
         self.lbl_market_status = tk.Label(
             status_frame,
             textvariable=self.var_market_status,
             bg=self.bg_color,
             fg=self.color_text_dim,
-            font=self.font_market_status,
-            anchor="w",
+            font=self.font_header,
+            anchor="center",
+            pady=0,
         )
-        self.lbl_market_status.pack(side="left", padx=(0, SPACING["xxs"]))
+        self.lbl_market_status.pack(side="left", fill="y", padx=(0, SPACING["xxs"]))
 
         self.var_market_label = tk.StringVar(value="Piyasa bekleniyor")
         self.lbl_market_label = tk.Label(
@@ -2366,27 +2461,24 @@ class PiyasaWidget:
             font=self.font_header,
             anchor="w",
         )
-        self.lbl_market_label.pack(side="left")
+        self.lbl_market_label.pack(side="left", fill="y")
         
         # Navigasyon çerçevesi
         nav_frame = tk.Frame(header_frame, bg=self.bg_color)
         nav_frame.pack(side="right")
         
-        self.btn_prev = tk.Label(nav_frame, text="‹", bg=self.bg_color, fg=self.color_text_muted, font=self.font_nav_arrow, cursor="hand2")
+        self.btn_prev = IconButton(nav_frame, "previous", self.prev_page, size=28,
+                                   bg=self.bg_color, fg=self.color_text_muted, show_border=False)
         self.btn_prev.pack(side="left", padx=(0, SPACING["xxs"]))
-        self.btn_prev.bind("<Button-1>", lambda e: self.prev_page())
-        self.btn_prev.bind("<Enter>", lambda e: self.btn_prev.config(fg=self.color_text_main))
-        self.btn_prev.bind("<Leave>", lambda e: self._update_arrow_colors())
         
         self.var_time = tk.StringVar(value="--:--")
         self.lbl_time = tk.Label(nav_frame, textvariable=self.var_time, bg=self.bg_color, fg=self.color_text_dim, font=self.font_header, anchor="center")
-        self.lbl_time.pack(side="left")
+        self.lbl_time.pack(side="left", fill="y")
         
-        self.btn_next = tk.Label(nav_frame, text="›", bg=self.bg_color, fg=self.color_text_muted, font=self.font_nav_arrow, cursor="hand2")
+        self.btn_next = IconButton(nav_frame, "next", self.next_page, size=28,
+                                   bg=self.bg_color, fg=self.color_text_muted, show_border=False)
         self.btn_next.pack(side="left", padx=(SPACING["xxs"], 0))
-        self.btn_next.bind("<Button-1>", lambda e: self.next_page())
-        self.btn_next.bind("<Enter>", lambda e: self.btn_next.config(fg=self.color_text_main))
-        self.btn_next.bind("<Leave>", lambda e: self._update_arrow_colors())
+        status_frame.pack_configure(fill="both")
 
         # 4. FOOTER (kompakt araç çubuğu) - footer önce pack edilir (side=bottom)
         footer_frame = tk.Frame(
@@ -2400,20 +2492,19 @@ class PiyasaWidget:
         footer_frame.pack(side="bottom", fill="x", pady=(SPACING["xs"], 0))
 
         self.footer_buttons = {}
-        for key, icon_name, callback in (
-            ("settings", "settings", self.open_settings),
-            ("import", "import", self.import_transactions),
-            ("add", "plus", self.open_add_transaction),
-            ("refresh", "refresh", self.request_data_refresh),
+        for key, icon_name, label, callback in (
+            ("settings", "settings", "Ayarlar", self.open_settings),
+            ("refresh", "refresh", "Yenile", self.request_data_refresh),
         ):
             button = IconButton(
                 footer_frame,
                 icon_name,
                 callback,
-                size=28,
+                size=32,
+                label=label,
                 bg=self.color_card,
                 hover_bg=THEME["surface_hover"],
-                fg=self.color_text_muted,
+                fg=self.color_text_dim,
                 hover_fg=self.color_text_main,
                 show_border=False,
             )
@@ -2602,29 +2693,21 @@ class PiyasaWidget:
             self.ROW_DRAG_HOLD_MS,
             lambda item_key=key: self._activate_price_row_drag(item_key),
         )
-        # Keep the existing quick window-drag gesture available. Row motion
-        # starts intercepting events only while this press remains a click or
-        # after the one-second hold activates reordering.
-        return None
+        # Every part of a quote row owns this gesture, including its padding.
+        return "break"
 
     def _activate_price_row_drag(self, key):
         self._row_hold_after_id = None
         if self._row_press_key != key or not self._row_press_origin:
             return
-        last = self._row_press_last or self._row_press_origin
-        dx = last[0] - self._row_press_origin[0]
-        dy = last[1] - self._row_press_origin[1]
-        tolerance = self.ROW_DRAG_MOVE_TOLERANCE_PX
-        if (dx * dx) + (dy * dy) > tolerance * tolerance:
-            self._cancel_price_row_drag()
-            return
-
         self._row_drag_key = key
         self._row_drag_original_order = [item["key"] for item in self.watchlist]
         self._row_drag_order = list(self._row_drag_original_order)
         row = self.price_row_widgets.get(key)
         if row:
             row.config(highlightbackground=self.color_accent)
+            for widget in (row, *row.winfo_children()):
+                widget.configure(cursor="fleur")
         self.root.config(cursor="fleur")
 
     def _on_price_row_motion(self, event, key):
@@ -2639,9 +2722,11 @@ class PiyasaWidget:
                 dy = event.y_root - origin[1]
                 tolerance = self.ROW_DRAG_MOVE_TOLERANCE_PX
                 if (dx * dx) + (dy * dy) > tolerance * tolerance:
-                    self._cancel_price_row_drag()
-                    return None
-            return "break"
+                    if self._row_hold_after_id is not None:
+                        self.root.after_cancel(self._row_hold_after_id)
+                    self._activate_price_row_drag(key)
+            if self._row_drag_key != key:
+                return "break"
 
         self.root.update_idletasks()
         midpoints = {}
@@ -2675,7 +2760,7 @@ class PiyasaWidget:
             if is_click:
                 self._open_price_row_chart(key)
                 return "break"
-            return None
+            return "break"
 
         original_order = list(self._row_drag_original_order or [])
         final_order = list(self._row_drag_order or original_order)
@@ -2730,6 +2815,8 @@ class PiyasaWidget:
         row = getattr(self, "price_row_widgets", {}).get(drag_key)
         if row and row.winfo_exists():
             row.config(highlightbackground=self.color_border)
+            for widget in (row, *row.winfo_children()):
+                widget.configure(cursor="hand2")
         if hasattr(self, "root"):
             try:
                 self.root.config(cursor="")
@@ -2750,10 +2837,10 @@ class PiyasaWidget:
         return f"{sign}{change_pct:.1f}%"
 
     def _get_change_pct(self, key, _current_value):
-        """Return the same 24-hour change represented by the mini chart."""
+        """Return the change over the user's selected mini chart period."""
         try:
             rows, _source, _interval = self._cached_history_series(
-                key, 24 * 60 * 60
+                key, self._sparkline_period_seconds()
             )
         except Exception:
             return None
@@ -2765,10 +2852,14 @@ class PiyasaWidget:
             return None
         return ((last_value - first_value) / first_value) * 100
 
+    def _sparkline_period_seconds(self):
+        variable = getattr(self, "sparkline_period", None)
+        return variable.get() if variable is not None else 86400
+
     def _get_sparkline_values(self, key, current_value):
         try:
             rows, _source, _interval = self._cached_history_series(
-                key, 24 * 60 * 60
+                key, self._sparkline_period_seconds()
             )
         except Exception:
             rows = []
@@ -2941,8 +3032,10 @@ class PiyasaWidget:
             self.show_page(self.current_page - 1)
     
     def _update_arrow_colors(self):
-        self.btn_prev.config(fg=self.color_text_dim if self.current_page > 0 else self.color_border)
-        self.btn_next.config(fg=self.color_text_dim if self.current_page < len(self.pages) - 1 else self.color_border)
+        for button, enabled in ((self.btn_prev, self.current_page > 0),
+                                (self.btn_next, self.current_page < len(self.pages) - 1)):
+            button.normal_fg = self.color_text_dim if enabled else self.color_border
+            button._draw()
 
     # --- Grafik Sayfası ---
     def _build_chart_page(self):
@@ -4155,7 +4248,7 @@ class PiyasaWidget:
             # Piyasa kontrolü
             if self.is_market_closed():
                 def set_closed_ui():
-                    self.var_market_status.set("•")
+                    self.var_market_status.set("●")
                     self.lbl_market_status.config(fg=self.color_danger) # Kırmızı nokta
                     if hasattr(self, "var_market_label"):
                         self.var_market_label.set("Piyasa Kapalı")
@@ -4176,7 +4269,7 @@ class PiyasaWidget:
                 return # API isteği atma
 
             def set_open_ui():
-                self.var_market_status.set("•")
+                self.var_market_status.set("●")
                 self.lbl_market_status.config(fg=self.color_success) # Yeşil nokta
                 if hasattr(self, "var_market_label"):
                     self.var_market_label.set("Piyasa Açık")

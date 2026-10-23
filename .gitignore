@@ -1,5 +1,6 @@
 /transactions.json
 /watchlist.json
+/preferences.json
 __pycache__/
 .pyc
 market_history.db

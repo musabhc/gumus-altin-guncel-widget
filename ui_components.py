@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+import math
 from tkinter import ttk
 
 from theme import SPACING, THEME, font
@@ -442,6 +443,16 @@ class ThemedPopupMenu(tk.Toplevel):
         self.items.append({"type": "separator", "label": None, "row": separator})
         return separator
 
+    def add_choice(self, *, label, variable, options, command):
+        section = tk.Frame(self.body, bg=THEME["surface_alt"])
+        section.pack(fill="x", padx=12, pady=8)
+        tk.Label(section, text=label, bg=THEME["surface_alt"],
+                 fg=THEME["text_secondary"], font=font(self, "small")).pack(anchor="w")
+        control = SegmentedControl(section, variable, options, command=command, columns=4)
+        control.pack(fill="x", pady=(6, 0))
+        self.items.append({"type": "choice", "label": label, "row": section})
+        return control
+
     def show_for_widget(self, anchor, *, gap=8):
         self.update_idletasks()
         width = max(self.menu_width, self.winfo_reqwidth())
@@ -455,6 +466,7 @@ class ThemedPopupMenu(tk.Toplevel):
         x = max(4, min(x, screen_width - width - 4))
         y = max(4, min(y, screen_height - height - 4))
         self.geometry(f"{width}x{height}+{x}+{y}")
+        self.attributes("-topmost", True)
         self.deiconify()
         self.lift()
         self._visible = True
@@ -516,10 +528,11 @@ class IconButton(tk.Canvas):
         hover_fg=THEME["text_primary"],
         danger=False,
         show_border=True,
+        label=None,
     ):
         super().__init__(
             master,
-            width=size,
+            width=size if not label else size + 76,
             height=size,
             bg=bg,
             highlightthickness=1 if show_border else 0,
@@ -529,6 +542,7 @@ class IconButton(tk.Canvas):
             takefocus=1,
         )
         self.icon = icon
+        self.label = label
         self.command = command
         self.size = size
         self.normal_bg = bg
@@ -569,6 +583,9 @@ class IconButton(tk.Canvas):
         c = s / 2
         w = 1.6
         tag = "icon"
+        if self.label:
+            self.create_text(s + 2, c, text=self.label, anchor="w", fill=color,
+                             font=font(self, "small", "bold"), tags=tag)
         if self.icon == "edit":
             self.create_line(c - 5, c + 5, c + 5, c - 5, fill=color, width=w, tags=tag)
             self.create_line(c - 6, c + 2, c - 6, c + 6, c - 2, c + 6, fill=color, width=w, tags=tag)
@@ -588,17 +605,31 @@ class IconButton(tk.Canvas):
             self.create_arc(c - 7, c - 7, c + 7, c + 7, start=25, extent=300, style="arc", outline=color, width=w, tags=tag)
             self.create_line(c - 7, c - 5, c - 8, c, c - 3, c - 1, fill=color, width=w, tags=tag)
         elif self.icon == "refresh":
-            self.create_arc(c - 7, c - 7, c + 7, c + 7, start=35, extent=275, style="arc", outline=color, width=w, tags=tag)
-            self.create_line(c + 5, c - 7, c + 8, c - 7, c + 8, c - 3, fill=color, width=w, tags=tag)
+            self.create_arc(c - 7, c - 7, c + 7, c + 7, start=45, extent=290,
+                            style="arc", outline=color, width=2, tags=tag)
+            self.create_polygon(c + 3, c - 8, c + 9, c - 7, c + 7, c - 1,
+                                fill=color, outline=color, tags=tag)
         elif self.icon == "import":
             self.create_rectangle(c - 6, c + 1, c + 6, c + 7, outline=color, width=w, tags=tag)
             self.create_line(c, c - 7, c, c + 3, fill=color, width=w, tags=tag)
             self.create_line(c - 4, c - 1, c, c + 3, c + 4, c - 1, fill=color, width=w, tags=tag)
         elif self.icon == "settings":
-            self.create_oval(c - 6, c - 6, c + 6, c + 6, outline=color, width=w, tags=tag)
-            self.create_oval(c - 2, c - 2, c + 2, c + 2, outline=color, width=w, tags=tag)
-            for dx, dy in ((0, -9), (0, 9), (-9, 0), (9, 0)):
-                self.create_line(c + dx * .65, c + dy * .65, c + dx, c + dy, fill=color, width=w, tags=tag)
+            points = []
+            for tooth in range(8):
+                for offset, radius in ((-.48, 7), (-.26, 10), (.26, 10), (.48, 7)):
+                    angle = (tooth + offset) * math.pi / 4
+                    points.extend((c + radius * math.cos(angle), c + radius * math.sin(angle)))
+            self.create_polygon(*points, fill=color, outline=color, tags=tag)
+            self.create_oval(c - 4, c - 4, c + 4, c + 4,
+                             fill=self.hover_bg if self._hovered else self.normal_bg,
+                             outline="", tags=tag)
+        elif self.icon in ("previous", "next"):
+            direction = -1 if self.icon == "previous" else 1
+            self.create_line(c - direction * 2, c - 5, c + direction * 3, c,
+                             c - direction * 2, c + 5, fill=color, width=2, tags=tag)
+        elif self.icon == "close":
+            self.create_line(c - 5, c - 5, c + 5, c + 5, fill=color, width=2, tags=tag)
+            self.create_line(c + 5, c - 5, c - 5, c + 5, fill=color, width=2, tags=tag)
         elif self.icon == "chart":
             self.create_line(c - 7, c + 7, c - 7, c - 6, fill=color, width=w, tags=tag)
             self.create_line(c - 7, c + 7, c + 7, c + 7, fill=color, width=w, tags=tag)
@@ -619,10 +650,12 @@ class TransactionTable(tk.Frame):
         ("actions", "", 72, 0),
     )
 
-    def __init__(self, master, on_edit, on_delete):
+    def __init__(self, master, on_edit, on_delete, on_sort=None):
         super().__init__(master, bg=THEME["surface"], bd=0)
         self.on_edit = on_edit
         self.on_delete = on_delete
+        self.on_sort = on_sort
+        self.heading_buttons = {}
         self.rows = []
         self._row_widgets = {}
         self._selected_index = None
@@ -631,15 +664,23 @@ class TransactionTable(tk.Frame):
         self.header.pack(fill="x")
         self.header.grid_propagate(False)
         self._configure_columns(self.header)
-        for column, (_key, title, _minsize, _weight) in enumerate(self.COLUMN_CONFIG):
-            tk.Label(
+        for column, (key, title, _minsize, _weight) in enumerate(self.COLUMN_CONFIG):
+            heading = HoverButton(
                 self.header,
                 text=title,
                 bg=THEME["surface_alt"],
+                hover_bg=THEME["surface_hover"],
+                pressed_bg=THEME["surface_pressed"],
                 fg=THEME["text_secondary"],
-                font=font(master, "small", "bold"),
+                command=lambda name=key: self.on_sort(name) if self.on_sort else None,
                 anchor="w" if column in (0, 2) else "center",
-            ).grid(row=0, column=column, sticky="nsew", padx=(12 if column == 0 else 6))
+            )
+            heading.configure(font=font(master, "small", "bold"))
+            heading.grid(row=0, column=column, sticky="nsew", padx=(12 if column == 0 else 6))
+            self.heading_buttons[key] = heading
+            if key == "actions":
+                heading._disabled_bg = THEME["surface_alt"]
+                heading.configure(state="disabled")
 
         body = tk.Frame(self, bg=THEME["surface"])
         body.pack(fill="both", expand=True)
@@ -664,6 +705,11 @@ class TransactionTable(tk.Frame):
         self.canvas.bind("<Down>", lambda _e: self._move_selection(1))
         self.canvas.bind("<Return>", lambda _e: self._invoke_selected(self.on_edit))
         self.canvas.bind("<Delete>", lambda _e: self._invoke_selected(self.on_delete))
+
+    def set_sort_indicator(self, key, direction):
+        for name, title, _minsize, _weight in self.COLUMN_CONFIG:
+            suffix = (" ↑" if direction == 1 else " ↓") if name == key and direction else ""
+            self.heading_buttons[name].configure(text=title + suffix)
 
     def _configure_columns(self, frame):
         for column, (_key, _title, minsize, weight) in enumerate(self.COLUMN_CONFIG):
