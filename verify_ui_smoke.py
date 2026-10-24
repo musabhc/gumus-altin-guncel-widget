@@ -90,6 +90,7 @@ class IsolatedTkSmokeTest(unittest.TestCase):
     def _require_tk(self):
         """Skip cleanly when Tcl/Tk cannot connect to the current desktop."""
 
+        main.enable_high_dpi()
         probe = None
         try:
             probe = tk.Tk()
@@ -395,7 +396,7 @@ class IsolatedTkSmokeTest(unittest.TestCase):
             json.dump({"sparkline_period": 999}, target)
         self.assertEqual(self.app._load_preferences()["sparkline_period"], 86400)
 
-    def test_header_alignment_and_footer_labels(self):
+    def test_header_alignment_and_footer_icons(self):
         self._require_tk()
         self._build_piyasa_widget()
         self.app.root.deiconify()
@@ -408,13 +409,91 @@ class IsolatedTkSmokeTest(unittest.TestCase):
             centers = [widget.winfo_rooty() + widget.winfo_height() / 2 for widget in widgets]
             self.assertLessEqual(max(centers) - min(centers), 1)
         self.assertEqual(set(self.app.footer_buttons), {"settings", "refresh"})
-        self.assertEqual(self.app.footer_buttons["refresh"].label, "Yenile")
-        self.assertEqual(self.app.footer_buttons["settings"].label, "Ayarlar")
+        for button in self.app.footer_buttons.values():
+            self.assertIsNone(button.label)
+            self.assertEqual(int(button.cget("width")), 32)
+            self.assertEqual([button.type(item) for item in button.find_withtag("icon")], ["image"])
         self.app.root.attributes("-topmost", True)
         self.app.open_settings()
         self.app.root.update()
         self.assertTrue(self.app.settings_menu.winfo_viewable())
         self.assertTrue(self.app.settings_menu.attributes("-topmost"))
+
+    def test_navigation_clicks_and_pointer_jitter_never_move_the_window(self):
+        self._require_tk()
+        self._build_piyasa_widget()
+        self.app.root.geometry("368x600+60+60")
+        self.app.root.deiconify()
+        self.app.root.update()
+        initial_position = (self.app.root.winfo_x(), self.app.root.winfo_y())
+        # First move the window normally, to leave the old code's stale local
+        # coordinates behind before reproducing the navigation gesture.
+        frame = self.app.frame
+        x, y = frame.winfo_rootx() + 3, frame.winfo_rooty() + 3
+        frame.event_generate("<ButtonPress-1>", x=3, y=3, rootx=x, rooty=y)
+        frame.event_generate("<B1-Motion>", x=27, y=19, rootx=x+24, rooty=y+16)
+        frame.event_generate("<ButtonRelease-1>", x=27, y=19, rootx=x+24, rooty=y+16)
+        self.app.root.update()
+        expected_position = (initial_position[0]+24, initial_position[1]+16)
+        self.assertEqual((self.app.root.winfo_x(), self.app.root.winfo_y()), expected_position)
+        for jitter in (0, 2, -2):
+            for button, page in ((self.app.btn_next, 1), (self.app.btn_next, 2),
+                                 (self.app.btn_prev, 1), (self.app.btn_prev, 0)):
+                x, y = button.winfo_rootx()+14, button.winfo_rooty()+14
+                button.event_generate("<ButtonPress-1>", x=14, y=14, rootx=x, rooty=y)
+                if jitter:
+                    button.event_generate("<B1-Motion>", x=14+jitter, y=14,
+                                          rootx=x+jitter, rooty=y)
+                button.event_generate("<ButtonRelease-1>", x=14+jitter, y=14,
+                                      rootx=x+jitter, rooty=y)
+                self.app.root.update()
+                self.assertEqual(self.app.current_page, page)
+                self.assertEqual((self.app.root.winfo_x(), self.app.root.winfo_y()), expected_position)
+                self.assertIsNone(self.app._window_move_origin)
+        # Dragging off a button cancels activation and still cannot move the app.
+        button = self.app.btn_next
+        x, y = button.winfo_rootx()+14, button.winfo_rooty()+14
+        button.event_generate("<ButtonPress-1>", x=14, y=14, rootx=x, rooty=y)
+        button.event_generate("<B1-Motion>", x=34, y=14, rootx=x+20, rooty=y)
+        button.event_generate("<ButtonRelease-1>", x=14, y=14, rootx=x, rooty=y)
+        self.assertEqual(self.app.current_page, 0)
+        self.assertEqual((self.app.root.winfo_x(), self.app.root.winfo_y()), expected_position)
+
+    def test_portfolio_opens_in_front_with_either_widget_topmost_setting(self):
+        self._require_tk()
+        self._build_piyasa_widget()
+        self.app.root.geometry("368x600+80+80")
+        self.app.root.deiconify()
+        self.app.root.update()
+        for topmost in (False, True):
+            self.app.root.attributes("-topmost", topmost)
+            self.app.open_settings()
+            self.app.root.update()
+            manage_row = self.app.settings_menu.items[0]["row"]
+            manage_row.event_generate("<ButtonRelease-1>", x=10, y=10)
+            self.dialog = self.app.portfolio_dialog
+            self.dialog.geometry("1120x760+80+80")
+            self.app.root.update()
+            self.assertFalse(self.app.settings_menu.is_visible())
+            self.assertEqual(bool(self.dialog.attributes("-topmost")), topmost)
+            self.assertEqual(self.dialog.focus_displayof().winfo_toplevel(), self.dialog)
+            covering = self.app.root.winfo_containing(100, 160)
+            self.assertIsNotNone(covering)
+            self.assertEqual(covering.winfo_toplevel(), self.dialog)
+            self.dialog.destroy()
+            self.dialog = None
+
+    def test_curves_and_icons_have_antialiased_edges_at_different_sizes(self):
+        from rendering import render_icon, render_chart_line
+
+        for size in (24, 32, 48):
+            for icon in ("settings", "refresh", "previous", "next", "edit", "delete"):
+                artwork = render_icon(icon, size, "#FFFFFF")
+                self.assertEqual(artwork.size, (size, size))
+                alpha = set(artwork.getchannel("A").getdata())
+                self.assertTrue(any(0 < value < 255 for value in alpha))
+        curve = render_chart_line(62, 22, [(1, 19), (23.25, 2.5), (60, 14)], "#FFFFFF")
+        self.assertTrue(any(0 < value < 255 for value in curve.getchannel("A").getdata()))
 
     def test_transaction_headers_cycle_sort_and_preserve_record_identity(self):
         self._require_tk()

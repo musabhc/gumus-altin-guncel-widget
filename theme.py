@@ -7,7 +7,26 @@ and persistence stay in :mod:`main`.
 from __future__ import annotations
 
 import tkinter.font as tkfont
+import ctypes
+import sys
 from tkinter import ttk
+
+
+def enable_high_dpi():
+    """Opt into native Windows display resolution before creating any HWNDs."""
+    if sys.platform != "win32":
+        return
+    try:
+        # System awareness avoids bitmap virtualization and works with Tk 8.6's
+        # process-wide font metrics when moving between different displays.
+        if ctypes.windll.shcore.SetProcessDpiAwareness(1) == 0:
+            return
+    except (AttributeError, OSError):
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        pass
 
 
 THEME = {

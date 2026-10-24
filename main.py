@@ -16,8 +16,10 @@ import webbrowser
 import subprocess
 from datetime import datetime, timedelta
 from tkinter import messagebox, filedialog
+from PIL import ImageTk
 
-from theme import SPACING, THEME, configure_ttk_styles, font
+from theme import SPACING, THEME, configure_ttk_styles, enable_high_dpi, font
+from rendering import render_asset_ring, render_chart_line
 from ui_components import (
     HoverButton,
     IconButton,
@@ -1287,8 +1289,9 @@ class PortfolioManagerDialog(tk.Toplevel):
         for handle in (header, title_label, subtitle_label):
             handle.bind("<ButtonPress-1>", self._start_window_move)
             handle.bind("<B1-Motion>", self._move_window)
-        self.resize_grip = tk.Label(self, text="◢", bg=self.bg_color,
-                                    fg=self.color_text_muted, cursor="sizing")
+        self.resize_grip = IconButton(self, "grip", None, size=14, bg=self.bg_color,
+                                      fg=self.color_text_muted, show_border=False)
+        self.resize_grip.configure(cursor="sizing")
         self.resize_grip.place(relx=1, rely=1, anchor="se")
         self.resize_grip.bind("<ButtonPress-1>", self._start_window_resize)
         self.resize_grip.bind("<B1-Motion>", self._resize_window)
@@ -1571,6 +1574,17 @@ class PortfolioManagerDialog(tk.Toplevel):
         self.bind("<Destroy>", self._on_dialog_destroy, add="+")
         self._search_trace_id = self.var_search.trace_add("write", self._on_search_changed)
         self.load_list()
+        self.after_idle(self.present)
+
+    def present(self):
+        """Map above the owner, including when the widget is always on top."""
+        if not self.winfo_exists():
+            return
+        parent = self.master.winfo_toplevel()
+        self.attributes("-topmost", bool(parent.attributes("-topmost")))
+        self.deiconify()
+        self.lift(parent)
+        self.focus_force()
 
     def _start_window_move(self, event):
         self._window_move_origin = (event.x_root - self.winfo_x(), event.y_root - self.winfo_y())
@@ -2209,6 +2223,7 @@ class PiyasaWidget:
         return width, height, x, y
 
     def __init__(self):
+        enable_high_dpi()
         self.root = tk.Tk()
         self.root.title("Market Widget")
         
@@ -2279,6 +2294,7 @@ class PiyasaWidget:
         
         # Sürükleme Özelliği
         self._is_resizing = False
+        self._window_move_origin = None
         self.root.bind("<Button-1>", self.start_move)
         self.root.bind("<B1-Motion>", self.do_move)
         self.root.bind("<ButtonRelease-1>", self._on_button_release)
@@ -2492,16 +2508,15 @@ class PiyasaWidget:
         footer_frame.pack(side="bottom", fill="x", pady=(SPACING["xs"], 0))
 
         self.footer_buttons = {}
-        for key, icon_name, label, callback in (
-            ("settings", "settings", "Ayarlar", self.open_settings),
-            ("refresh", "refresh", "Yenile", self.request_data_refresh),
+        for key, icon_name, callback in (
+            ("settings", "settings", self.open_settings),
+            ("refresh", "refresh", self.request_data_refresh),
         ):
             button = IconButton(
                 footer_frame,
                 icon_name,
                 callback,
                 size=32,
-                label=label,
                 bg=self.color_card,
                 hover_bg=THEME["surface_hover"],
                 fg=self.color_text_dim,
@@ -2562,19 +2577,20 @@ class PiyasaWidget:
         self.show_page(0)
 
         # --- Yeniden Boyutlandırma (Resize Grip) ---
-        self.grip = tk.Label(self.root, text="◢", bg=self.bg_color, fg=self.color_border, font=(font_family, 8), cursor="sizing")
+        self.grip = IconButton(self.root, "grip", None, size=14,
+                               bg=self.bg_color, fg=self.color_border, show_border=False)
+        self.grip.configure(cursor="sizing")
         self.grip.place(relx=1.0, rely=1.0, anchor="se")
         self.grip.bind("<ButtonPress-1>", self.start_resize)
         self.grip.bind("<B1-Motion>", self.do_resize)
         self.grip.bind("<ButtonRelease-1>", self._on_resize_end)
-        self.grip.bind("<Enter>", lambda e: self.grip.config(fg=self.color_text_muted))
-        self.grip.bind("<Leave>", lambda e: self.grip.config(fg=self.color_border))
 
     def _draw_asset_icon(self, canvas, instrument):
-        """Draw a small dependency-free asset mark on a market row."""
+        """Combine an antialiased ring with native, DPI-aware font rendering."""
         canvas.delete("all")
         color = instrument.get("color", self.color_accent)
-        canvas.create_oval(2, 2, 22, 22, fill=THEME["surface_hover"], outline=color, width=1)
+        canvas._asset_image = ImageTk.PhotoImage(render_asset_ring(24, color, THEME["surface_hover"]), master=canvas)
+        canvas.create_image(0, 0, anchor="nw", image=canvas._asset_image)
         label = str(instrument.get("label") or instrument.get("key") or "?")
         canvas.create_text(12, 12, text=label[:1].upper(), fill=color, font=self.font_small)
 
@@ -2894,23 +2910,25 @@ class PiyasaWidget:
             if height <= 1:
                 height = max(canvas.winfo_reqheight(), 22)
             if len(values) < 2:
-                y = height // 2
-                canvas.create_line(0, y, width, y, fill=self.color_border, width=1)
+                y = height / 2
+                canvas._line_image = ImageTk.PhotoImage(render_chart_line(
+                    width, height, [(0, y), (width, y)], self.color_border, stroke=1
+                ), master=canvas)
+                canvas.create_image(0, 0, anchor="nw", image=canvas._line_image)
                 return
             min_v = min(values)
             max_v = max(values)
             value_range = max_v - min_v if max_v != min_v else 1
             points = []
             for i, value in enumerate(values):
-                x = int((width - 2) * i / max(len(values) - 1, 1)) + 1
-                y = int((height - 4) * (1 - (value - min_v) / value_range)) + 2
+                x = (width - 2) * i / max(len(values) - 1, 1) + 1
+                y = (height - 4) * (1 - (value - min_v) / value_range) + 2
                 points.append((x, y))
-            flat = [coord for point in points for coord in point]
-            # Straight segments preserve the provider bars. Tk's spline mode
-            # can overshoot real highs/lows and make a sparkline look invented.
-            canvas.create_line(flat, fill=color, width=1.5)
-            last_x, last_y = points[-1]
-            canvas.create_oval(last_x - 1.75, last_y - 1.75, last_x + 1.75, last_y + 1.75, fill=color, outline="")
+            # Antialias the straight segments without changing the data curve.
+            canvas._line_image = ImageTk.PhotoImage(render_chart_line(
+                width, height, points, color, endpoint=1.75
+            ), master=canvas)
+            canvas.create_image(0, 0, anchor="nw", image=canvas._line_image)
         except Exception:
             pass
 
@@ -2981,14 +2999,10 @@ class PiyasaWidget:
                 bd=0,
             )
             marker.grid(row=0, column=0, sticky="w", padx=(0, 6))
-            marker.create_oval(
-                2,
-                2,
-                8,
-                8,
-                fill=row_data.get("color", self.color_accent),
-                outline="",
-            )
+            marker._marker_image = ImageTk.PhotoImage(render_chart_line(
+                10, 10, [(5, 5)], row_data.get("color", self.color_accent), endpoint=3
+            ), master=marker)
+            marker.create_image(0, 0, anchor="nw", image=marker._marker_image)
 
             qty = f"{row_data['quantity']:,.2f}".rstrip("0").rstrip(".")
             left = f"{row_data['label']}: {qty} {row_data['unit']}"
@@ -3527,28 +3541,14 @@ class PiyasaWidget:
                     ) / time_span
                 else:
                     ratio = index / max(len(values) - 1, 1)
-                x = pad_l + int(gw * ratio)
-                y = pad_t + int(
-                    gh * (1 - (value - chart_min) / val_range)
-                )
+                x = pad_l + gw * ratio
+                y = pad_t + gh * (1 - (value - chart_min) / val_range)
                 points.append((x, y))
 
-            if len(points) >= 2:
-                fill_points = list(points) + [
-                    (points[-1][0], pad_t + gh),
-                    (points[0][0], pad_t + gh),
-                ]
-                self.chart_canvas.create_polygon(
-                    [coord for point in fill_points for coord in point],
-                    fill=color,
-                    stipple="gray12",
-                    outline="",
-                )
-                self.chart_canvas.create_line(
-                    [coord for point in points for coord in point],
-                    fill=color,
-                    width=2,
-                )
+            self.chart_canvas._chart_line_image = ImageTk.PhotoImage(render_chart_line(
+                cw, ch, points, color, stroke=2, endpoint=3, fill_to=pad_t + gh
+            ), master=self.chart_canvas)
+            self.chart_canvas.create_image(0, 0, anchor="nw", image=self.chart_canvas._chart_line_image)
 
             label_count = min(4, len(points))
             visible_span = (
@@ -3579,15 +3579,6 @@ class PiyasaWidget:
 
             last_x, last_y = points[-1]
             last_value = values[-1]
-            self.chart_canvas.create_oval(
-                last_x - 3,
-                last_y - 3,
-                last_x + 3,
-                last_y + 3,
-                fill=color,
-                outline=self.color_card,
-                width=1,
-            )
             self.chart_canvas.create_text(
                 min(last_x - 5, cw - pad_r - 2),
                 max(last_y - 12, pad_t + 5),
@@ -4400,17 +4391,11 @@ class PiyasaWidget:
              self.lbl_profit.config(fg=self.color_text_dim, bg=self.color_card_alt)
 
     def open_add_transaction(self):
-        # Güncel dolar kurunu bul
-        current_dollar = 0
-        try:
-             # var_gumus_tl'den veya hesaplamadan bulabilirdik ama temiz olsun diye yeniden çekebiliriz
-             # veya veri_getir içindeki 'dolar' değişkenini class attribute yapalım.
-             # Hızlı çözüm: self.last_dolar_rate ekleyelim.
-             pass
-        except:
-             pass
-             
-        PortfolioManagerDialog(self.root, self.tm, self.request_data_refresh, getattr(self, 'last_dolar_rate', 36.0), self.watchlist)
+        self.portfolio_dialog = PortfolioManagerDialog(
+            self.root, self.tm, self.request_data_refresh,
+            getattr(self, "last_dolar_rate", 36.0), self.watchlist,
+        )
+        return self.portfolio_dialog
 
     def import_transactions(self):
         filename = filedialog.askopenfilename(title="İçe Aktarılacak Dosyayı Seç", filetypes=[("JSON Files", "*.json")])
@@ -4517,6 +4502,7 @@ class PiyasaWidget:
     def _on_button_release(self, event):
         """Genel buton bırakma - resize flag'ini temizle."""
         self._is_resizing = False
+        self._window_move_origin = None
 
     def on_resize(self, event):
         if event.widget == self.root:
@@ -4553,21 +4539,27 @@ class PiyasaWidget:
 
     # --- Sürükleme Mantığı ---
     def start_move(self, event):
-        # Resize grip üzerindeyse sürüklemeyi başlatma
-        if event.widget == self.grip:
-            return
-        self.x = event.x
-        self.y = event.y
+        self._window_move_origin = None
+        widget = event.widget
+        while widget is not None and widget != self.root:
+            if widget == self.grip or isinstance(widget, (
+                tk.Canvas, tk.Button, tk.Entry, tk.Radiobutton, tk.Checkbutton,
+                ttk.Combobox, ttk.Scrollbar, ttk.Treeview,
+            )):
+                return
+            widget = widget.master
+        self._window_move_origin = (event.x_root, event.y_root,
+                                    self.root.winfo_x(), self.root.winfo_y())
 
     def do_move(self, event):
-        # Resize sırasında pencereyi sürükleme
-        if self._is_resizing or self._row_drag_key is not None:
+        origin = self._window_move_origin
+        if origin is None or self._is_resizing or self._row_press_key is not None:
             return
-        deltax = event.x - self.x
-        deltay = event.y - self.y
-        x = self.root.winfo_x() + deltax
-        y = self.root.winfo_y() + deltay
-        self.root.geometry(f"+{x}+{y}")
+        pointer_x, pointer_y, window_x, window_y = origin
+        dx, dy = event.x_root - pointer_x, event.y_root - pointer_y
+        if abs(dx) <= 4 and abs(dy) <= 4:
+            return
+        self.root.geometry(f"{window_x + dx:+d}{window_y + dy:+d}")
 
     def show_menu(self, event):
         self.menu.post(event.x_root, event.y_root)

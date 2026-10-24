@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import tkinter as tk
-import math
 from tkinter import ttk
+from PIL import ImageTk
 
 from theme import SPACING, THEME, font
+from rendering import render_icon
 
 
 class HoverButton(tk.Button):
@@ -167,8 +168,8 @@ class SearchEntry(tk.Frame):
             bd=0,
         )
         self.icon.pack(side="left", padx=(9, 2))
-        self.icon.create_oval(5, 4, 13, 12, outline=THEME["text_muted"], width=1.5)
-        self.icon.create_line(12, 11, 16, 15, fill=THEME["text_muted"], width=1.5)
+        self._search_image = ImageTk.PhotoImage(render_icon("search", 20, THEME["text_muted"]), master=self)
+        self.icon.create_image(0, 0, anchor="nw", image=self._search_image)
         self.entry = tk.Entry(
             self,
             textvariable=variable,
@@ -513,7 +514,7 @@ class ThemedPopupMenu(tk.Toplevel):
 
 
 class IconButton(tk.Canvas):
-    """Small dependency-free line-icon button drawn on a Canvas."""
+    """Antialiased icon button that consumes its entire pointer gesture."""
 
     def __init__(
         self,
@@ -550,11 +551,15 @@ class IconButton(tk.Canvas):
         self.normal_fg = THEME["negative"] if danger else fg
         self.hover_fg = THEME["negative"] if danger else hover_fg
         self._hovered = False
+        self._pressed = False
+        self._press_origin = None
         self.bind("<Enter>", self._enter)
         self.bind("<Leave>", self._leave)
-        self.bind("<Button-1>", self._click)
-        self.bind("<Return>", lambda _e: self.invoke())
-        self.bind("<space>", lambda _e: self.invoke())
+        self.bind("<ButtonPress-1>", self._press)
+        self.bind("<B1-Motion>", self._motion)
+        self.bind("<ButtonRelease-1>", self._release)
+        self.bind("<Return>", self._click)
+        self.bind("<space>", self._click)
         self.bind("<Configure>", lambda _e: self._draw(), add="+")
         self._draw()
 
@@ -564,6 +569,26 @@ class IconButton(tk.Canvas):
 
     def _click(self, _event=None):
         self.invoke()
+        return "break"
+
+    def _press(self, event):
+        self._pressed = True
+        self._press_origin = (event.x_root, event.y_root)
+        return "break"
+
+    def _motion(self, event):
+        if self._press_origin:
+            x, y = self._press_origin
+            if abs(event.x_root - x) > 8 or abs(event.y_root - y) > 8:
+                self._pressed = False
+        return "break"
+
+    def _release(self, event):
+        activate = self._pressed and 0 <= event.x < self.winfo_width() and 0 <= event.y < self.winfo_height()
+        self._pressed = False
+        self._press_origin = None
+        if activate:
+            self.invoke()
         return "break"
 
     def _enter(self, _event=None):
@@ -579,63 +604,13 @@ class IconButton(tk.Canvas):
     def _draw(self):
         self.delete("icon")
         color = self.hover_fg if self._hovered else self.normal_fg
-        s = max(16, min(self.winfo_width(), self.winfo_height()))
-        c = s / 2
-        w = 1.6
-        tag = "icon"
+        width, height = self.winfo_width(), self.winfo_height()
+        size = self.size if min(width, height) <= 1 else min(width, height)
+        self._icon_image = ImageTk.PhotoImage(render_icon(self.icon, size, color), master=self)
+        self.create_image(0, 0, anchor="nw", image=self._icon_image, tags="icon")
         if self.label:
-            self.create_text(s + 2, c, text=self.label, anchor="w", fill=color,
-                             font=font(self, "small", "bold"), tags=tag)
-        if self.icon == "edit":
-            self.create_line(c - 5, c + 5, c + 5, c - 5, fill=color, width=w, tags=tag)
-            self.create_line(c - 6, c + 2, c - 6, c + 6, c - 2, c + 6, fill=color, width=w, tags=tag)
-            self.create_line(c + 3, c - 6, c + 6, c - 3, fill=color, width=w, tags=tag)
-        elif self.icon == "delete":
-            self.create_rectangle(c - 5, c - 3, c + 5, c + 7, outline=color, width=w, tags=tag)
-            self.create_line(c - 7, c - 5, c + 7, c - 5, fill=color, width=w, tags=tag)
-            self.create_line(c - 2, c - 7, c + 2, c - 7, fill=color, width=w, tags=tag)
-            self.create_line(c - 2, c, c - 2, c + 4, fill=color, width=w, tags=tag)
-            self.create_line(c + 2, c, c + 2, c + 4, fill=color, width=w, tags=tag)
-        elif self.icon == "plus":
-            self.create_line(c - 6, c, c + 6, c, fill=color, width=2, tags=tag)
-            self.create_line(c, c - 6, c, c + 6, fill=color, width=2, tags=tag)
-        elif self.icon == "minus":
-            self.create_line(c - 6, c, c + 6, c, fill=color, width=2, tags=tag)
-        elif self.icon == "reset":
-            self.create_arc(c - 7, c - 7, c + 7, c + 7, start=25, extent=300, style="arc", outline=color, width=w, tags=tag)
-            self.create_line(c - 7, c - 5, c - 8, c, c - 3, c - 1, fill=color, width=w, tags=tag)
-        elif self.icon == "refresh":
-            self.create_arc(c - 7, c - 7, c + 7, c + 7, start=45, extent=290,
-                            style="arc", outline=color, width=2, tags=tag)
-            self.create_polygon(c + 3, c - 8, c + 9, c - 7, c + 7, c - 1,
-                                fill=color, outline=color, tags=tag)
-        elif self.icon == "import":
-            self.create_rectangle(c - 6, c + 1, c + 6, c + 7, outline=color, width=w, tags=tag)
-            self.create_line(c, c - 7, c, c + 3, fill=color, width=w, tags=tag)
-            self.create_line(c - 4, c - 1, c, c + 3, c + 4, c - 1, fill=color, width=w, tags=tag)
-        elif self.icon == "settings":
-            points = []
-            for tooth in range(8):
-                for offset, radius in ((-.48, 7), (-.26, 10), (.26, 10), (.48, 7)):
-                    angle = (tooth + offset) * math.pi / 4
-                    points.extend((c + radius * math.cos(angle), c + radius * math.sin(angle)))
-            self.create_polygon(*points, fill=color, outline=color, tags=tag)
-            self.create_oval(c - 4, c - 4, c + 4, c + 4,
-                             fill=self.hover_bg if self._hovered else self.normal_bg,
-                             outline="", tags=tag)
-        elif self.icon in ("previous", "next"):
-            direction = -1 if self.icon == "previous" else 1
-            self.create_line(c - direction * 2, c - 5, c + direction * 3, c,
-                             c - direction * 2, c + 5, fill=color, width=2, tags=tag)
-        elif self.icon == "close":
-            self.create_line(c - 5, c - 5, c + 5, c + 5, fill=color, width=2, tags=tag)
-            self.create_line(c + 5, c - 5, c - 5, c + 5, fill=color, width=2, tags=tag)
-        elif self.icon == "chart":
-            self.create_line(c - 7, c + 7, c - 7, c - 6, fill=color, width=w, tags=tag)
-            self.create_line(c - 7, c + 7, c + 7, c + 7, fill=color, width=w, tags=tag)
-            self.create_line(c - 4, c + 3, c - 1, c - 1, c + 2, c + 1, c + 6, c - 5, fill=color, width=w, tags=tag)
-        else:
-            self.create_oval(c - 5, c - 5, c + 5, c + 5, outline=color, width=w, tags=tag)
+            self.create_text(size + 2, size / 2, text=self.label, anchor="w", fill=color,
+                             font=font(self, "small", "bold"), tags="icon")
 
 
 class TransactionTable(tk.Frame):
