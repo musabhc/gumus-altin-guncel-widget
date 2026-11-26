@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import sys
@@ -92,7 +93,7 @@ class TestDynamicMarketPersistence(unittest.TestCase):
 
         self.widget.veri_getir()
 
-        self.widget.price_vars["thyao"].set.assert_called_with("₺300.00")
+        self.widget.price_vars["thyao"].set.assert_called_with("₺300,00")
         self.widget.var_market_label.set.assert_called_with("Piyasa Kapalı")
         self.widget.var_time.set.assert_called_with("Son: Closed Time")
 
@@ -115,7 +116,7 @@ class TestDynamicMarketPersistence(unittest.TestCase):
         self.assertEqual(loaded["prices"]["gumus_ons"], 30.0)
         self.assertAlmostEqual(loaded["prices"]["gumus_tl"], (30.0 * 40.0) / main.TROY_OUNCE_GRAMS)
         self.assertEqual(loaded["sources"]["gumus_ons"], main.SILVER_SPOT_SYMBOL)
-        self.widget.price_vars["thyao"].set.assert_called_with("₺300.00")
+        self.widget.price_vars["thyao"].set.assert_called_with("₺300,00")
 
         inserted_prices = self.widget.history_db.insert_prices.call_args.args[0]
         self.assertEqual(inserted_prices["thyao"], 300.0)
@@ -645,6 +646,119 @@ class TestMultiAssetPortfolio(unittest.TestCase):
 
             self.assertEqual(summary["total_value_tl"], 0)
             self.assertFalse(summary["rows"][0]["has_price"])
+            self.assertEqual(summary["profit_tl"], 0)
+
+    def test_average_cost_survives_price_refresh_and_retains_historical_fx(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "transactions.json")
+            manager = main.TransactionManager(path)
+            manager.save_many([
+                {"instrument_key": "thyao", "quantity": 10, "total_tl": 1000},
+                {"instrument_key": "thyao", "quantity": 10, "total_tl": 2000},
+                {"amount_g": 5, "total_tl": 250},
+                {"instrument_key": "gumus_tl", "quantity": 5, "total_tl": 350},
+                {"instrument_key": "aapl", "quantity": 2, "currency": "USD",
+                 "total_usd": 100, "fx_rate": 40},
+            ])
+            manager = main.TransactionManager(path)
+            with patch.object(
+                manager, "_calculate_positions", wraps=manager._calculate_positions
+            ) as calculate:
+                for prices in (
+                    {"thyao": 180, "gumus_tl": 65, "dolar": 41},
+                    {"thyao": 220, "gumus_tl": 70, "dolar": 45},
+                ):
+                    summary = manager.get_portfolio_summary(prices, main.default_watchlist())
+                    rows = {row["key"]: row for row in summary["rows"]}
+                    self.assertEqual(rows["thyao"]["average_cost_tl"], 150)
+                    self.assertEqual(rows["gumus_tl"]["average_cost_tl"], 60)
+                    self.assertEqual(rows["aapl"]["average_cost_tl"], 2000)
+                calculate.assert_called_once()
+            self.assertEqual(summary["profit_tl"], 1500)
+
+    def test_average_cost_handles_partial_sale_edits_and_closed_positions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manager = main.TransactionManager(os.path.join(tmp, "transactions.json"))
+            manager.save_many([
+                {"instrument_key": "thyao", "quantity": 10, "total_tl": 1000},
+                {"instrument_key": "thyao", "quantity": 10, "total_tl": 2000},
+                {"instrument_key": "thyao", "action": "sell", "quantity": 4, "total_tl": 1200},
+            ])
+            self.assertEqual(manager.get_average_cost("thyao"), 150)
+            self.assertEqual(manager.get_positions()["thyao"]["realized_profit_tl"], 600)
+
+            manager.replace(1, {"instrument_key": "thyao", "quantity": 10, "total_tl": 3000})
+            self.assertEqual(manager.get_average_cost("thyao"), 200)
+            manager.delete(1)
+            self.assertEqual(manager.get_average_cost("thyao"), 100)
+
+            manager.save({"instrument_key": "thyao", "action": "sell", "quantity": 6, "total_tl": 1800})
+            self.assertIsNone(manager.get_average_cost("thyao"))
+            manager.save({"instrument_key": "thyao", "quantity": 2, "total_tl": 600})
+            self.assertEqual(manager.get_average_cost("thyao"), 300)
+
+    def test_invalid_batch_or_failed_write_leaves_ledger_and_cost_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "transactions.json")
+            manager = main.TransactionManager(path)
+            manager.save({"instrument_key": "thyao", "quantity": 10, "total_tl": 1000})
+            second_buy = {"instrument_key": "thyao", "quantity": 10, "total_tl": 2000}
+
+            with self.assertRaises(ValueError):
+                manager.save_many([
+                    second_buy,
+                    {"instrument_key": "thyao", "action": "sell", "quantity": 30, "total_tl": 3000},
+                ])
+            self.assertEqual(manager.get_average_cost("thyao"), 100)
+
+            with patch.object(main.os, "replace", side_effect=OSError("write failed")):
+                with self.assertRaises(OSError):
+                    manager.save(second_buy)
+            self.assertEqual(manager.get_position_quantity("thyao"), 10)
+            self.assertEqual(manager.get_average_cost("thyao"), 100)
+            self.assertEqual(main.TransactionManager(path).transactions, manager.transactions)
+
+    def test_edit_and_delete_validate_later_sales_in_ledger_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "transactions.json")
+            manager = main.TransactionManager(path)
+            first_buy = {"instrument_key": "thyao", "quantity": 5, "total_tl": 500}
+            sale = {"instrument_key": "thyao", "action": "sell", "quantity": 4, "total_tl": 600}
+            later_buy = {"instrument_key": "thyao", "quantity": 10, "total_tl": 2000}
+            manager.save_many([first_buy, sale, later_buy])
+
+            smaller_sale = dict(sale, quantity=3, total_tl=450)
+            manager.replace(1, smaller_sale)
+            expected = [first_buy, smaller_sale, later_buy]
+            self.assertEqual(manager.get_position_quantity("thyao"), 12)
+            self.assertAlmostEqual(manager.get_average_cost("thyao"), 2200 / 12)
+
+            with self.assertRaises(ValueError):
+                manager.replace(1, dict(sale, quantity=6))
+            with self.assertRaises(ValueError):
+                manager.replace(0, dict(first_buy, quantity=2))
+            with self.assertRaises(ValueError):
+                manager.delete(0)
+
+            self.assertEqual(manager.transactions, expected)
+            self.assertEqual(main.TransactionManager(path).transactions, expected)
+            self.assertEqual(manager.get_position_quantity("thyao"), 12)
+            self.assertAlmostEqual(manager.get_average_cost("thyao"), 2200 / 12)
+
+    def test_legacy_oversold_ledger_can_be_repaired(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "transactions.json")
+            original_buy = {"quantity": 5, "total_tl": 500}
+            legacy_sale = {"action": "sell", "quantity": 7, "total_tl": 840}
+            with open(path, "w", encoding="utf-8") as file:
+                json.dump([original_buy, legacy_sale], file)
+
+            manager = main.TransactionManager(path)
+            self.assertIsNone(manager.get_average_cost("gumus_tl"))
+            manager.replace(0, dict(original_buy, quantity=6, total_tl=600))
+            manager.replace(1, dict(legacy_sale, quantity=4, total_tl=480))
+            self.assertEqual(manager.get_position_quantity("gumus_tl"), 2)
+            self.assertEqual(manager.get_average_cost("gumus_tl"), 100)
 
 
 class TestWatchlistManager(unittest.TestCase):

@@ -2,12 +2,43 @@
 
 from __future__ import annotations
 
+import ctypes
+from ctypes import wintypes
+import sys
 import tkinter as tk
 from tkinter import ttk
 from PIL import ImageTk
 
 from theme import SPACING, THEME, font
 from rendering import render_icon
+
+
+def monitor_work_area(x, y, width, height):
+    """Return the work area intersecting a rectangle in Windows screen coordinates."""
+    if sys.platform != "win32":
+        return None
+
+    class MonitorInfo(ctypes.Structure):
+        _fields_ = [
+            ("size", wintypes.DWORD), ("monitor", wintypes.RECT),
+            ("work", wintypes.RECT), ("flags", wintypes.DWORD),
+        ]
+
+    user32 = ctypes.windll.user32
+    monitor_from_rect = user32.MonitorFromRect
+    monitor_from_rect.argtypes = (ctypes.POINTER(wintypes.RECT), wintypes.DWORD)
+    monitor_from_rect.restype = wintypes.HANDLE
+    rect = wintypes.RECT(x, y, x + width, y + height)
+    monitor = monitor_from_rect(ctypes.byref(rect), 0)  # MONITOR_DEFAULTTONULL
+    if not monitor:
+        return None
+    get_monitor_info = user32.GetMonitorInfoW
+    get_monitor_info.argtypes = (wintypes.HANDLE, ctypes.POINTER(MonitorInfo))
+    get_monitor_info.restype = wintypes.BOOL
+    info = MonitorInfo(size=ctypes.sizeof(MonitorInfo))
+    if get_monitor_info(monitor, ctypes.byref(info)):
+        return info.work.left, info.work.top, info.work.right, info.work.bottom
+    return None
 
 
 class HoverButton(tk.Button):
@@ -21,7 +52,7 @@ class HoverButton(tk.Button):
         hover_bg=THEME["primary_hover"],
         pressed_bg=THEME["primary_pressed"],
         disabled_bg=THEME["border"],
-        fg=THEME["white"],
+        fg=THEME["primary_ink"],
         disabled_fg=THEME["text_muted"],
         **kwargs,
     ):
@@ -76,6 +107,11 @@ class HoverButton(tk.Button):
         super().configure(bg=self._hover_bg if inside else self._normal_bg)
 
     def configure(self, cnf=None, **kwargs):
+        if "bg" in kwargs:
+            self._normal_bg = kwargs["bg"]
+        if "fg" in kwargs:
+            self._normal_fg = kwargs["fg"]
+            kwargs.setdefault("activeforeground", self._normal_fg)
         result = super().configure(cnf, **kwargs)
         if hasattr(self, "_normal_bg") and "state" in kwargs:
             self._on_leave()
@@ -111,7 +147,7 @@ class ModernEntry(tk.Frame):
             disabledbackground=THEME["surface_alt"],
             disabledforeground=THEME["text_muted"],
             selectbackground=THEME["primary"],
-            selectforeground=THEME["white"],
+            selectforeground=THEME["primary_ink"],
             relief="flat",
             bd=0,
             highlightthickness=0,
@@ -177,7 +213,7 @@ class SearchEntry(tk.Frame):
             fg=THEME["text_primary"],
             insertbackground=THEME["text_primary"],
             selectbackground=THEME["primary"],
-            selectforeground=THEME["white"],
+            selectforeground=THEME["primary_ink"],
             relief="flat",
             bd=0,
             highlightthickness=0,
@@ -458,14 +494,17 @@ class ThemedPopupMenu(tk.Toplevel):
         self.update_idletasks()
         width = max(self.menu_width, self.winfo_reqwidth())
         height = self.winfo_reqheight()
-        screen_width = self.winfo_screenwidth()
-        screen_height = self.winfo_screenheight()
-        x = anchor.winfo_rootx() + anchor.winfo_width() - width
-        y = anchor.winfo_rooty() - height - gap
-        if y < 0:
-            y = anchor.winfo_rooty() + anchor.winfo_height() + gap
-        x = max(4, min(x, screen_width - width - 4))
-        y = max(4, min(y, screen_height - height - 4))
+        anchor_x, anchor_y = anchor.winfo_rootx(), anchor.winfo_rooty()
+        anchor_width, anchor_height = anchor.winfo_width(), anchor.winfo_height()
+        left, top, right, bottom = monitor_work_area(anchor_x, anchor_y, anchor_width, anchor_height) or (
+            0, 0, self.winfo_screenwidth(), self.winfo_screenheight(),
+        )
+        x = anchor_x + anchor_width - width
+        y = anchor_y - height - gap
+        if y < top:
+            y = anchor_y + anchor_height + gap
+        x = max(left + 4, min(x, right - width - 4))
+        y = max(top + 4, min(y, bottom - height - 4))
         self.geometry(f"{width}x{height}+{x}+{y}")
         self.attributes("-topmost", True)
         self.deiconify()
@@ -631,6 +670,7 @@ class TransactionTable(tk.Frame):
         self.on_delete = on_delete
         self.on_sort = on_sort
         self.heading_buttons = {}
+        self._sort_indicator = (None, 0)
         self.rows = []
         self._row_widgets = {}
         self._selected_index = None
@@ -670,6 +710,7 @@ class TransactionTable(tk.Frame):
         self.scrollbar.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
         self.inner = tk.Frame(self.canvas, bg=THEME["surface"])
+        self.inner.grid_columnconfigure(0, weight=1)
         self._window_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
         self.inner.bind("<Configure>", self._sync_scrollregion)
         self.canvas.bind("<Configure>", self._sync_width)
@@ -682,6 +723,10 @@ class TransactionTable(tk.Frame):
         self.canvas.bind("<Delete>", lambda _e: self._invoke_selected(self.on_delete))
 
     def set_sort_indicator(self, key, direction):
+        indicator = (key, direction)
+        if self._sort_indicator == indicator:
+            return
+        self._sort_indicator = indicator
         for name, title, _minsize, _weight in self.COLUMN_CONFIG:
             suffix = (" ↑" if direction == 1 else " ↓") if name == key and direction else ""
             self.heading_buttons[name].configure(text=title + suffix)
@@ -715,10 +760,12 @@ class TransactionTable(tk.Frame):
         self._selected_index = None
 
     def set_rows(self, rows):
-        previous_selection = self._selected_index
-        self.clear()
-        self.rows = list(rows)
-        if not self.rows:
+        rows = list(rows)
+        if rows == self.rows and (rows or self.inner.winfo_children()):
+            return
+
+        if not rows:
+            self.clear()
             empty = tk.Label(
                 self.inner,
                 text="Bu filtreyle eşleşen işlem bulunamadı.",
@@ -727,104 +774,132 @@ class TransactionTable(tk.Frame):
                 font=font(self, "body"),
                 pady=28,
             )
-            empty.pack(fill="x")
+            empty.grid(row=0, column=0, sticky="ew")
             self._bind_wheel(empty)
             return
 
-        for display_index, row_data in enumerate(self.rows):
+        if not self.rows:
+            self.clear()
+        previous_rows = {row["source_index"]: (index, row) for index, row in enumerate(self.rows)}
+        visible_indices = {row["source_index"] for row in rows}
+        for source_index in self._row_widgets.keys() - visible_indices:
+            self._row_widgets.pop(source_index)["frame"].destroy()
+
+        # Keep visible widgets whose data has not changed, even when sorted.
+        for display_index, row_data in enumerate(rows):
             source_index = row_data["source_index"]
-            base_bg = THEME["surface"] if display_index % 2 == 0 else "#0F1B2C"
-            row = tk.Frame(
-                self.inner,
-                bg=base_bg,
-                height=40,
-                highlightthickness=0,
-                bd=0,
-                cursor="hand2",
-                takefocus=1,
-            )
-            row.pack(fill="x")
-            row.grid_propagate(False)
-            self._configure_columns(row)
-            normal_widgets = []
+            base_bg = THEME["surface"] if display_index % 2 == 0 else THEME["surface_stripe"]
+            info = self._row_widgets.get(source_index)
+            previous_index, previous_data = previous_rows.get(source_index, (None, None))
+            if info is not None and previous_data != row_data:
+                self._row_widgets.pop(source_index)["frame"].destroy()
+                info = None
+            if info is None:
+                info = self._create_row(row_data, base_bg)
+                previous_index = None
+            elif info["base_bg"] != base_bg:
+                previous_bg = info["base_bg"]
+                info["base_bg"] = base_bg
+                if str(info["frame"].cget("bg")) == previous_bg:
+                    self._set_row_bg(source_index, base_bg)
 
-            def add_label(column, text, anchor="center", color=THEME["text_primary"]):
-                label = tk.Label(
-                    row,
-                    text=text,
-                    bg=base_bg,
-                    fg=color,
-                    font=font(self, "body"),
-                    anchor=anchor,
-                )
-                label.grid(row=0, column=column, sticky="nsew", padx=(12 if column == 0 else 6))
-                normal_widgets.append(label)
-                return label
+            if display_index != previous_index:
+                info["frame"].grid(row=display_index, column=0, sticky="ew")
 
-            add_label(0, row_data["date"], "w", THEME["text_secondary"])
-            badge_cell = tk.Frame(row, bg=base_bg)
-            badge_cell.grid(row=0, column=1, sticky="nsew")
-            normal_widgets.append(badge_cell)
-            is_buy = row_data["action_key"] == "buy"
-            badge = tk.Label(
-                badge_cell,
-                text=row_data["action"],
-                bg=THEME["positive_soft"] if is_buy else THEME["negative_soft"],
-                fg=THEME["positive"] if is_buy else THEME["negative"],
-                font=font(self, "small", "bold"),
-                padx=8,
-                pady=3,
-            )
-            badge.place(relx=.5, rely=.5, anchor="center")
-            add_label(2, row_data["asset"], "w")
-            add_label(3, row_data["amount"], "e", THEME["text_secondary"])
-            add_label(4, row_data["total"], "e")
-
-            action_cell = tk.Frame(row, bg=base_bg)
-            action_cell.grid(row=0, column=5, sticky="nsew")
-            normal_widgets.append(action_cell)
-            delete_button = IconButton(
-                action_cell,
-                "delete",
-                lambda idx=source_index: self.on_delete(str(idx)),
-                size=24,
-                bg=base_bg,
-                show_border=False,
-                danger=True,
-            )
-            delete_button.pack(side="right", padx=(1, 7), pady=7)
-            edit_button = IconButton(
-                action_cell,
-                "edit",
-                lambda idx=source_index: self.on_edit(str(idx)),
-                size=24,
-                bg=base_bg,
-                show_border=False,
-            )
-            edit_button.pack(side="right", padx=1, pady=7)
-
-            row_info = {
-                "frame": row,
-                "normal_widgets": normal_widgets,
-                "badge": badge,
-                "edit": edit_button,
-                "delete": delete_button,
-                "base_bg": base_bg,
-            }
-            self._row_widgets[source_index] = row_info
-            for widget in [row, *normal_widgets]:
-                widget.bind("<Button-1>", lambda _e, idx=source_index: self.select(idx), add="+")
-                widget.bind("<Enter>", lambda _e, idx=source_index: self._set_hover(idx, True), add="+")
-                widget.bind("<Leave>", lambda _e, idx=source_index: self._set_hover(idx, False), add="+")
-                self._bind_wheel(widget)
-            self._bind_wheel(badge)
-            self._bind_wheel(edit_button)
-            self._bind_wheel(delete_button)
-
-        visible_indices = {row["source_index"] for row in self.rows}
-        if previous_selection in visible_indices:
-            self.select(previous_selection)
+        self.rows = rows
+        if self._selected_index in visible_indices:
+            self._set_row_bg(self._selected_index, THEME["primary_soft"])
+        else:
+            self._selected_index = None
         self.canvas.yview_moveto(0)
+
+    def _create_row(self, row_data, base_bg):
+        source_index = row_data["source_index"]
+        row = tk.Frame(
+            self.inner,
+            bg=base_bg,
+            height=40,
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+            takefocus=1,
+        )
+        row.grid_propagate(False)
+        self._configure_columns(row)
+        normal_widgets = []
+
+        def add_label(column, text, anchor="center", color=THEME["text_primary"]):
+            label = tk.Label(
+                row,
+                text=text,
+                bg=base_bg,
+                fg=color,
+                font=font(self, "body"),
+                anchor=anchor,
+            )
+            label.grid(row=0, column=column, sticky="nsew", padx=(12 if column == 0 else 6))
+            normal_widgets.append(label)
+            return label
+
+        add_label(0, row_data["date"], "w", THEME["text_secondary"])
+        badge_cell = tk.Frame(row, bg=base_bg)
+        badge_cell.grid(row=0, column=1, sticky="nsew")
+        normal_widgets.append(badge_cell)
+        is_buy = row_data["action_key"] == "buy"
+        badge = tk.Label(
+            badge_cell,
+            text=row_data["action"],
+            bg=THEME["positive_soft"] if is_buy else THEME["negative_soft"],
+            fg=THEME["positive"] if is_buy else THEME["negative"],
+            font=font(self, "small", "bold"),
+            padx=8,
+            pady=3,
+        )
+        badge.place(relx=.5, rely=.5, anchor="center")
+        add_label(2, row_data["asset"], "w")
+        add_label(3, row_data["amount"], "e", THEME["text_secondary"])
+        add_label(4, row_data["total"], "e")
+
+        action_cell = tk.Frame(row, bg=base_bg)
+        action_cell.grid(row=0, column=5, sticky="nsew")
+        normal_widgets.append(action_cell)
+        delete_button = IconButton(
+            action_cell,
+            "delete",
+            lambda idx=source_index: self.on_delete(str(idx)),
+            size=24,
+            bg=base_bg,
+            show_border=False,
+            danger=True,
+        )
+        delete_button.pack(side="right", padx=(1, 7), pady=7)
+        edit_button = IconButton(
+            action_cell,
+            "edit",
+            lambda idx=source_index: self.on_edit(str(idx)),
+            size=24,
+            bg=base_bg,
+            show_border=False,
+        )
+        edit_button.pack(side="right", padx=1, pady=7)
+
+        row_info = {
+            "frame": row,
+            "normal_widgets": normal_widgets,
+            "badge": badge,
+            "edit": edit_button,
+            "delete": delete_button,
+            "base_bg": base_bg,
+        }
+        self._row_widgets[source_index] = row_info
+        for widget in [row, *normal_widgets, badge]:
+            widget.bind("<Button-1>", lambda _e, idx=source_index: self.select(idx), add="+")
+            widget.bind("<Enter>", lambda _e, idx=source_index: self._set_hover(idx, True), add="+")
+            widget.bind("<Leave>", lambda _e, idx=source_index: self._set_hover(idx, False), add="+")
+            self._bind_wheel(widget)
+        self._bind_wheel(edit_button)
+        self._bind_wheel(delete_button)
+        return row_info
 
     def _set_row_bg(self, source_index, color):
         info = self._row_widgets.get(source_index)

@@ -6,6 +6,9 @@
 #define MyAppPublisher "Musa"
 #define MyAppURL "https://github.com/musabhc/gumus-altin-guncel-widget"
 #define MyAppExeName "PiyasaWidget.exe"
+#ifndef BuildDir
+  #define BuildDir "dist\PiyasaWidget"
+#endif
 
 [Setup]
 ; NOTE: The value of AppId uniquely identifies this application. Do not use the same AppId value in installers for other applications.
@@ -37,13 +40,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked; OnlyBelowVersion: 6.1; Check: not IsAdminInstallMode
 
 [Files]
-; IMPORTANT: The source path below assumes you build the exe into 'dist' folder relative to this script
-Source: "dist\{#MyAppName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Mutable app data stays in its existing location during upgrades.
+Source: "{#BuildDir}\*"; Excludes: "transactions.json,watchlist.json,preferences.json,market_data.json,market_history.db,market_history.db-*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
-; Bundle default transactions only if not exists (so we don't overwrite user data on update)
-; NOTE: Inno Setup 'onlyifdoesntexist' flag is useful here.
-; Or simply don't include it if the app creates it. App creates it if missing, so skipping to keep it light.
-; Source: "transactions.json"; DestDir: "{app}"; Flags: onlyifdoesntexist
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

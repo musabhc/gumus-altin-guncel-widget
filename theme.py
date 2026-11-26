@@ -9,7 +9,7 @@ from __future__ import annotations
 import tkinter.font as tkfont
 import ctypes
 import sys
-from tkinter import ttk
+from tkinter import TclError, ttk
 
 
 def enable_high_dpi():
@@ -30,27 +30,29 @@ def enable_high_dpi():
 
 
 THEME = {
-    "background": "#08111F",
-    "surface": "#0D1828",
-    "surface_alt": "#121F31",
-    "surface_hover": "#17263A",
-    "surface_pressed": "#1B2D45",
-    "input": "#101D2F",
-    "border": "#223249",
-    "border_strong": "#30445F",
-    "text_primary": "#F4F7FB",
-    "text_secondary": "#A7B4C8",
-    "text_muted": "#6F8098",
-    "primary": "#3B82F6",
-    "primary_hover": "#5592F7",
-    "primary_pressed": "#2F6FD6",
-    "primary_soft": "#102A52",
-    "positive": "#35D07F",
-    "positive_soft": "#0E3428",
-    "negative": "#F25A68",
-    "negative_soft": "#3A1720",
-    "gold": "#F5B82E",
-    "silver": "#C8D4E3",
+    "background": "#101415",
+    "surface": "#171d1e",
+    "surface_alt": "#1d2526",
+    "surface_stripe": "#1a2122",
+    "surface_hover": "#25302d",
+    "surface_pressed": "#2b3734",
+    "input": "#101415",
+    "border": "#2a3435",
+    "border_strong": "#40534d",
+    "text_primary": "#eff4f2",
+    "text_secondary": "#a0aeac",
+    "text_muted": "#82928f",
+    "primary": "#7fe5b4",
+    "primary_hover": "#a0efc7",
+    "primary_pressed": "#65c89a",
+    "primary_soft": "#22302b",
+    "primary_ink": "#11281d",
+    "positive": "#7fe5b4",
+    "positive_soft": "#243b30",
+    "negative": "#f19a9b",
+    "negative_soft": "#402d30",
+    "gold": "#e6c587",
+    "silver": "#bacfe5",
     "white": "#FFFFFF",
 }
 
@@ -76,18 +78,32 @@ TYPOGRAPHY = {
     "value": 25,
 }
 
+_TURKISH_SEPARATORS = str.maketrans(",.", ".,")
+
+
+def turkish_number(value, decimal_places=2):
+    return f"{value:,.{decimal_places}f}".translate(_TURKISH_SEPARATORS)
+
 
 def resolve_font_family(widget) -> str:
     """Return the best Segoe UI family available on the current system."""
 
+    root = widget._root()
+    cached = getattr(root, "_finans_font_family", None)
+    if cached is not None:
+        return cached
     try:
-        available = set(tkfont.families(widget))
-    except Exception:
-        available = set()
-    for family in ("Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI"):
-        if family in available:
-            return family
-    return "TkDefaultFont"
+        available = set(tkfont.families(root))
+        family = next(
+            (name for name in ("Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI") if name in available),
+            None,
+        )
+        if family is None:
+            family = tkfont.nametofont("TkDefaultFont", root=root).actual("family")
+    except (RuntimeError, TclError):
+        return "TkDefaultFont"
+    root._finans_font_family = family
+    return family
 
 
 def font(widget, role="body", weight="normal"):
@@ -179,5 +195,5 @@ def configure_ttk_styles(widget):
     widget.option_add("*TCombobox*Listbox.background", THEME["surface_alt"])
     widget.option_add("*TCombobox*Listbox.foreground", THEME["text_primary"])
     widget.option_add("*TCombobox*Listbox.selectBackground", THEME["primary"])
-    widget.option_add("*TCombobox*Listbox.selectForeground", THEME["white"])
+    widget.option_add("*TCombobox*Listbox.selectForeground", THEME["primary_ink"])
     return style

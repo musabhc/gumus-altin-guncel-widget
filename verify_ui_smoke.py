@@ -14,6 +14,7 @@ import os
 import tempfile
 import tkinter as tk
 import unittest
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -268,13 +269,15 @@ class IsolatedTkSmokeTest(unittest.TestCase):
             with self.subTest(sequence=sequence):
                 self.assertTrue(self.app.chart_canvas.bind(sequence))
 
-        self.app._chart_full_values = list(range(20))
+        self.app._chart_rows = [(None, value) for value in range(20)]
         self.app._chart_plot_bounds = (20, 10, 220, 180)
         with patch.object(self.app, "_draw_chart") as draw_chart:
             wheel = SimpleNamespace(delta=120, x=120)
             self.assertEqual(self.app._on_chart_mousewheel(wheel), "break")
             self.assertAlmostEqual(self.app._chart_view_start, 0.175)
             self.assertAlmostEqual(self.app._chart_view_end, 0.825)
+            queued_frame = self.app._chart_frame_job
+            self.assertIsNotNone(queued_frame)
 
             self.assertEqual(
                 self.app._on_chart_pan_start(SimpleNamespace(x=120)),
@@ -294,6 +297,17 @@ class IsolatedTkSmokeTest(unittest.TestCase):
             )
             self.assertEqual(self.app._on_chart_pan_end(), "break")
             self.assertIsNone(self.app._chart_pan_origin)
+            self.assertEqual(self.app._chart_frame_job, queued_frame)
+            draw_chart.assert_not_called()
+
+            self.app.root.after_cancel(queued_frame)
+            self.app._draw_chart_preview()
+            draw_chart.assert_called_once_with(preview=True)
+
+            self.app.root.after_cancel(self.app._chart_settle_job)
+            self.app._finish_chart_redraw()
+            draw_chart.assert_called_with()
+            self.assertIsNone(self.app._chart_settle_job)
 
             self.assertEqual(
                 self.app.reset_chart_view(SimpleNamespace()),
@@ -303,7 +317,20 @@ class IsolatedTkSmokeTest(unittest.TestCase):
                 (self.app._chart_view_start, self.app._chart_view_end),
                 (0.0, 1.0),
             )
-            self.assertGreaterEqual(draw_chart.call_count, 3)
+            self.assertEqual(draw_chart.call_count, 3)
+
+    def test_zoomed_chart_selects_nearby_samples_across_market_closure(self):
+        widget = main.PiyasaWidget.__new__(main.PiyasaWidget)
+        first = datetime(2026, 11, 20, 18)
+        widget._chart_rows = [
+            (first + timedelta(hours=hours), value)
+            for hours, value in ((0, 100), (1, 105), (65, 110), (66, 115), (67, 120), (68, 125))
+        ]
+        widget._chart_time_ordered = True
+        widget._chart_view_start = 0.2
+        widget._chart_view_end = 0.3
+
+        self.assertEqual(widget._visible_chart_rows(), widget._chart_rows[1:3])
 
     def test_settings_menu_is_a_themeable_popup_with_preserved_actions(self):
         self._require_tk()
@@ -325,6 +352,7 @@ class IsolatedTkSmokeTest(unittest.TestCase):
                 ("separator", None),
                 ("choice", "Mini grafik zaman aralığı"),
                 ("separator", None),
+                ("command", "Detayları aç"),
                 ("command", "İzlenenleri düzenle"),
                 ("command", "Güncellemeleri kontrol et"),
                 ("separator", None),
@@ -385,10 +413,10 @@ class IsolatedTkSmokeTest(unittest.TestCase):
             with patch.object(self.app, "_cached_history_series", return_value=(
                 [("2026-10-23 12:00:00", 100), ("2026-10-24 12:00:00", 125)], "test", "5m"
             )) as history:
-                self.assertEqual(self.app._get_sparkline_values("thyao", 125), [100, 125])
-                self.assertEqual(self.app._get_change_pct("thyao", 125), 25)
-                self.assertEqual([call.args for call in history.call_args_list],
-                                 [("thyao", seconds), ("thyao", seconds)])
+                rows, change = self.app._sparkline_data("thyao", 125)
+                self.assertEqual([price for _time, price in rows], [100, 125])
+                self.assertEqual(change, 25)
+                history.assert_called_once_with("thyao", seconds)
             self.assertEqual(self.app._load_preferences()["sparkline_period"], seconds)
         self.assertEqual(self.app.chart_period.get(), main_chart_period)
         self.assert_temp_path(self.app.preferences_path)
@@ -418,6 +446,70 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         self.app.root.update()
         self.assertTrue(self.app.settings_menu.winfo_viewable())
         self.assertTrue(self.app.settings_menu.attributes("-topmost"))
+
+    def test_compact_actions_and_scrollable_overview(self):
+        self._require_tk()
+        self._build_piyasa_widget()
+        self.app.root.geometry("368x330")
+        self.app.root.deiconify()
+        self.app.root.update()
+
+        with (
+            patch.object(self.app, "open_workspace", create=True) as open_workspace,
+            patch.object(self.app, "open_add_transaction") as open_trade,
+        ):
+            self.app.btn_open_workspace.invoke()
+            self.app.btn_quick_trade.invoke()
+        open_workspace.assert_called_once_with()
+        open_trade.assert_called_once_with()
+
+        self.assertTrue(self.app.overview_scrollbar.winfo_ismapped())
+        top = self.app.overview_canvas.yview()[0]
+        self.app.overview_canvas.event_generate("<MouseWheel>", delta=-120)
+        self.assertGreater(self.app.overview_canvas.yview()[0], top)
+        self.app.root.geometry("368x750")
+        self.app.root.update()
+        self.assertFalse(self.app.overview_scrollbar.winfo_ismapped())
+        self.assertEqual(self.app.overview_canvas.yview(), (0.0, 1.0))
+
+    def test_widget_placement_and_topmost_are_restored_from_preferences(self):
+        self._require_tk()
+        preferences_path = os.path.join(self.temp_dir.name, "preferences.json")
+        with open(preferences_path, "w", encoding="utf-8") as target:
+            json.dump({"sparkline_period": 43200, "custom_field": "preserved"}, target)
+        self._build_piyasa_widget()
+        self.app.root.deiconify()
+        self.app.root.geometry("410x580+65+75")
+        self.app.root.update()
+        self.app._on_resize_end(None)
+        self.app.root.update()
+        self.app.var_topmost.set(True)
+        self.app.toggle_topmost()
+
+        with open(preferences_path, encoding="utf-8") as source:
+            self.assertEqual(json.load(source), {
+                "sparkline_period": 43200, "custom_field": "preserved",
+                "widget_geometry": {"width": 410, "height": 580, "x": 65, "y": 75},
+                "topmost": True,
+            })
+        self._cleanup_gui()
+        self._build_piyasa_widget()
+        self.app.root.deiconify()
+        self.app.root.update()
+        self.assertEqual(self.app.root.geometry(), "410x580+65+75")
+        self.assertTrue(self.app.var_topmost.get())
+        self.assertTrue(self.app.root.attributes("-topmost"))
+
+    def test_widget_placement_accepts_negative_monitor_coordinates_and_falls_back(self):
+        widget = main.PiyasaWidget.__new__(main.PiyasaWidget)
+        widget._preferences = {"widget_geometry": {"width": 368, "height": 536, "x": -410, "y": -70}}
+        with patch.object(main, "monitor_work_area", return_value=(-1920, -100, 0, 900)):
+            self.assertEqual(widget._initial_widget_geometry(1920, 1080), (368, 536, -410, -70))
+        with patch.object(main, "monitor_work_area", return_value=None):
+            self.assertEqual(
+                widget._initial_widget_geometry(1920, 1080),
+                widget.calculate_default_geometry(1920, 1080),
+            )
 
     def test_navigation_clicks_and_pointer_jitter_never_move_the_window(self):
         self._require_tk()
@@ -477,9 +569,10 @@ class IsolatedTkSmokeTest(unittest.TestCase):
             self.assertFalse(self.app.settings_menu.is_visible())
             self.assertEqual(bool(self.dialog.attributes("-topmost")), topmost)
             self.assertEqual(self.dialog.focus_displayof().winfo_toplevel(), self.dialog)
-            covering = self.app.root.winfo_containing(100, 160)
-            self.assertIsNotNone(covering)
-            self.assertEqual(covering.winfo_toplevel(), self.dialog)
+            dialog_above_owner = self.dialog.tk.call(
+                "wm", "stackorder", str(self.dialog), "isabove", str(self.app.root)
+            )
+            self.assertTrue(self.dialog.tk.getboolean(dialog_above_owner))
             self.dialog.destroy()
             self.dialog = None
 
@@ -492,8 +585,11 @@ class IsolatedTkSmokeTest(unittest.TestCase):
                 self.assertEqual(artwork.size, (size, size))
                 alpha = set(artwork.getchannel("A").getdata())
                 self.assertTrue(any(0 < value < 255 for value in alpha))
-        curve = render_chart_line(62, 22, [(1, 19), (23.25, 2.5), (60, 14)], "#FFFFFF")
-        self.assertTrue(any(0 < value < 255 for value in curve.getchannel("A").getdata()))
+        for preview in (False, True):
+            curve = render_chart_line(
+                62, 22, [(1, 19), (23.25, 2.5), (60, 14)], "#FFFFFF", preview=preview
+            )
+            self.assertTrue(any(0 < value < 255 for value in curve.getchannel("A").getdata()))
 
     def test_transaction_headers_cycle_sort_and_preserve_record_identity(self):
         self._require_tk()
@@ -622,10 +718,16 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         self.assertIn("THYAO", filter_values)
         self.assertIn("Apple", filter_values)
 
-        # StringVar traces call load_list synchronously.  Calling it explicitly
-        # keeps this assertion stable even if the UI later debounces typing.
-        self.dialog.var_search.set("THYAO")
-        self.dialog.load_list()
+        # Filtering keeps the matching widget and leaves input focus alone.
+        table = self.dialog.tree
+        table.select(1)
+        retained_row = table._row_widgets[1]["frame"]
+        with patch.object(table.canvas, "focus_set") as focus_table:
+            self.dialog.var_search.set("THYAO")
+            self.dialog.load_list()
+            focus_table.assert_not_called()
+        self.assertIs(table._row_widgets[1]["frame"], retained_row)
+        self.assertEqual(int(retained_row.grid_info()["row"]), 0)
         self.assertEqual(
             [row["source_index"] for row in self.dialog.tree.rows],
             [1],
@@ -742,6 +844,37 @@ class IsolatedTkSmokeTest(unittest.TestCase):
             saved = json.load(transaction_file)
         self.assertEqual(len(saved), 1)
         self.assertEqual(manager.normalize_transaction(saved[0])["quantity"], 10)
+
+    def test_portfolio_dialog_uses_recorded_rate_only_for_its_own_trade(self):
+        self._require_tk()
+        self.root = tk.Tk()
+        self.root.withdraw()
+        manager = main.TransactionManager(os.path.join(self.temp_dir.name, "transactions.json"))
+        rate = 30.123456
+        manager.save({
+            "date": "01-01-2026", "instrument_key": "thyao", "action": "buy",
+            "quantity": 2, "currency": "USD", "total_usd": 20, "fx_rate": rate,
+            "total_tl": 20 * rate,
+        })
+        self.dialog = main.PortfolioManagerDialog(
+            self.root, manager, lambda: None, None, main.default_watchlist()
+        )
+        self.dialog.withdraw()
+        self.assertEqual(self.dialog.entry_rate.get(), "")
+
+        self.dialog.start_edit("0")
+        self.assertEqual(float(self.dialog.entry_rate.get()), rate)
+        self.dialog.save()
+        self.assertEqual(manager.get_average_cost("thyao"), 10 * rate)
+        self.assertEqual(self.dialog.entry_rate.get(), "")
+
+        self.dialog.var_currency.set("USD")
+        self.dialog.entry_amount.insert(0, "1")
+        self.dialog.entry_total.insert(0, "20")
+        with patch.object(main.tk.messagebox, "showerror") as show_error:
+            self.dialog.save()
+        show_error.assert_called_once()
+        self.assertEqual(len(manager.transactions), 1)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Antialiased artwork rendered at four times the final display resolution."""
+"""Antialiased artwork rendered above the final display resolution."""
 
 from functools import lru_cache
 import math
@@ -10,36 +10,36 @@ SUPERSAMPLE = 4
 
 
 class Artwork:
-    def __init__(self, width, height):
+    def __init__(self, width, height, *, mode="RGBA", supersample=SUPERSAMPLE):
         self.width, self.height = max(1, int(width)), max(1, int(height))
-        self.image = Image.new("RGBA", (self.width * SUPERSAMPLE, self.height * SUPERSAMPLE))
+        self.supersample = supersample
+        self.image = Image.new(mode, (self.width * supersample, self.height * supersample))
         self.draw = ImageDraw.Draw(self.image)
 
-    @staticmethod
-    def coords(values):
-        return tuple(round(value * SUPERSAMPLE) for value in values)
+    def coords(self, values):
+        return tuple(round(value * self.supersample) for value in values)
 
     def line(self, points, color, width=1.6):
         scaled = [self.coords(point) for point in points]
-        self.draw.line(scaled, fill=color, width=round(width * SUPERSAMPLE), joint="curve")
+        self.draw.line(scaled, fill=color, width=round(width * self.supersample), joint="curve")
         radius = width / 2
         for x, y in (points[0], points[-1]):
             self.ellipse((x-radius, y-radius, x+radius, y+radius), fill=color)
 
     def ellipse(self, box, *, fill=None, outline=None, width=1):
-        self.draw.ellipse(self.coords(box), fill=fill, outline=outline, width=round(width * SUPERSAMPLE))
+        self.draw.ellipse(self.coords(box), fill=fill, outline=outline, width=round(width * self.supersample))
 
     def rectangle(self, box, color, width=1.6):
-        self.draw.rectangle(self.coords(box), outline=color, width=round(width * SUPERSAMPLE))
+        self.draw.rectangle(self.coords(box), outline=color, width=round(width * self.supersample))
 
     def polygon(self, points, color):
         self.draw.polygon([self.coords(point) for point in points], fill=color)
 
     def arc(self, box, start, end, color, width=1.6):
-        self.draw.arc(self.coords(box), start=start, end=end, fill=color, width=round(width * SUPERSAMPLE))
+        self.draw.arc(self.coords(box), start=start, end=end, fill=color, width=round(width * self.supersample))
 
-    def finish(self):
-        return self.image.resize((self.width, self.height), Image.Resampling.LANCZOS)
+    def finish(self, resample=Image.Resampling.LANCZOS):
+        return self.image.resize((self.width, self.height), resample)
 
 
 @lru_cache(maxsize=256)
@@ -104,15 +104,20 @@ def render_asset_ring(size, color, background):
     return art.finish()
 
 
-def render_chart_line(width, height, points, color, *, stroke=1.5, endpoint=0, fill_to=None):
-    art = Artwork(width, height)
+def render_chart_line(
+    width, height, points, color, *, stroke=1.5, endpoint=0, fill_to=None, preview=False
+):
+    # The curve and area share a color, so only their opacity needs supersampling.
+    art = Artwork(width, height, mode="L", supersample=2 if preview else SUPERSAMPLE)
+    red, green, blue, opacity = ImageColor.getcolor(color, "RGBA")
     if fill_to is not None and len(points) > 1:
-        # A translucent area replaces Tk's visibly dotted stipple pattern.
-        shade = ImageColor.getrgb(color) + (28,)
-        art.polygon(list(points) + [(points[-1][0], fill_to), (points[0][0], fill_to)], shade)
+        art.polygon(list(points) + [(points[-1][0], fill_to), (points[0][0], fill_to)], 28)
     if len(points) > 1:
-        art.line(points, color, stroke)
+        art.line(points, opacity, stroke)
     if points and endpoint:
         x, y = points[-1]
-        art.ellipse((x-endpoint, y-endpoint, x+endpoint, y+endpoint), fill=color)
-    return art.finish()
+        art.ellipse((x-endpoint, y-endpoint, x+endpoint, y+endpoint), fill=opacity)
+    result = Image.new("RGBA", (art.width, art.height), (red, green, blue))
+    resample = Image.Resampling.BOX if preview else Image.Resampling.LANCZOS
+    result.putalpha(art.finish(resample))
+    return result

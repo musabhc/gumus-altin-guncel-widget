@@ -42,7 +42,7 @@ jobs:
 
     - name: Build EXE
       run: |
-        pyinstaller --onedir --noconsole --name "PiyasaWidget" --icon=icon.ico --hidden-import=_version main.py
+        pyinstaller --onedir --contents-directory _internal --noconsole --name "PiyasaWidget" --icon=icon.ico --hidden-import=_version main.py
         
     - name: Sign EXE
       run: |
@@ -66,8 +66,7 @@ jobs:
       with:
         tag_name: v${{ steps.version.outputs.VERSION }}
         name: Release v${{ steps.version.outputs.VERSION }}
-        files: |
-          dist/PiyasaWidget.exe
-          Output/PiyasaWidget_Setup.exe
+        fail_on_unmatched_files: true
+        files: Output/PiyasaWidget_Setup.exe
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

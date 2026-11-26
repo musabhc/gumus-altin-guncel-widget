@@ -1,0 +1,864 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Piyasa — Masaüstü prototipi</title>
+  <style>
+    :root {
+      font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+      color-scheme: dark;
+      --bg: #101415;
+      --rail: #131819;
+      --panel: #171d1e;
+      --raised: #1d2526;
+      --line: #2a3435;
+      --soft-line: #252e2f;
+      --text: #eff4f2;
+      --muted: #a0aeac;
+      --subtle: #82928f;
+      --green: #7fe5b4;
+      --green-ink: #11281d;
+      --red: #f19a9b;
+      --radius: 16px;
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; min-width: 320px; background: var(--bg); color: var(--text); font-size: 1rem; }
+    button, input, select { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled { cursor: default; opacity: .45; }
+    button, a, input, select { -webkit-tap-highlight-color: transparent; }
+    :focus-visible { outline: 2px solid var(--green); outline-offset: 3px; }
+    button { color: inherit; }
+    h1, h2, h3, p { margin: 0; }
+    h1, h2, h3 { font-weight: 650; }
+    [hidden] { display: none !important; }
+    .icon { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
+    .num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .muted { color: var(--muted); }
+    .gain { color: var(--green); }
+    .loss { color: var(--red); }
+    .layout { min-height: 100vh; display: grid; grid-template-columns: 216px minmax(0, 1fr); }
+    .sidebar { position: sticky; top: 0; height: 100vh; padding: 28px 17px 20px; background: var(--rail); border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 39px; }
+    .brand { display: flex; align-items: center; gap: 11px; margin: 0 9px; font-size: 1.2rem; font-weight: 700; letter-spacing: -.035em; }
+    .brand-mark { display: grid; width: 37px; height: 37px; place-items: center; border-radius: 11px; background: var(--green); color: var(--green-ink); }
+    .brand-mark .icon { width: 23px; height: 23px; stroke-width: 2; }
+    .nav { display: grid; gap: 5px; }
+    .nav-button { display: flex; align-items: center; gap: 12px; min-height: 43px; width: 100%; padding: 0 12px; background: transparent; color: var(--muted); border: 1px solid transparent; border-radius: 9px; text-align: left; font-size: .91rem; font-weight: 570; white-space: nowrap; }
+    .nav-button:hover { background: var(--raised); color: var(--text); }
+    .nav-button[aria-current='page'] { background: #22302b; border-color: #2d4238; color: var(--green); }
+    .sidebar-tail { margin-top: auto; border-top: 1px solid var(--line); padding-top: 15px; }
+    .workspace { min-width: 0; }
+    .content { max-width: 1520px; margin: 0 auto; padding: 33px clamp(24px, 3vw, 54px) 40px; }
+    .page-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 27px; }
+    h1 { font-size: clamp(1.8rem, 3vw, 2.35rem); line-height: 1.1; letter-spacing: -.05em; }
+    .page-head p { margin-top: 8px; color: var(--muted); font-size: .92rem; }
+    .head-actions, .toolbar, .dialog-actions { display: flex; align-items: center; gap: 9px; }
+    .demo-label { display: inline-flex; align-items: center; gap: 7px; font-size: .84rem; color: var(--muted); white-space: nowrap; margin-right: 5px; }
+    .demo-dot { width: 7px; height: 7px; border-radius: 50%; background: #e6c587; }
+    .button { min-height: 39px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 7px 13px; border: 1px solid var(--line); background: var(--raised); border-radius: 8px; font-size: .875rem; font-weight: 620; white-space: nowrap; }
+    .button:hover:not(:disabled) { border-color: #53635e; background: #25302d; }
+    .button.primary { color: var(--green-ink); background: var(--green); border-color: var(--green); }
+    .button.primary:hover { background: #a0efc7; }
+    .button.danger { color: var(--red); }
+    .button.plain { background: transparent; border-color: transparent; color: var(--muted); }
+    .button.plain:hover { color: var(--text); background: var(--raised); border-color: var(--line); }
+    .button.square { width: 38px; padding: 0; }
+    .button .icon { width: 17px; height: 17px; }
+    .metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 13px; margin-bottom: 17px; }
+    .metric, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); min-width: 0; }
+    .metric { padding: 17px 20px 16px; }
+    .metric-label { display: flex; align-items: center; justify-content: space-between; gap: 6px; color: var(--muted); font-size: .88rem; }
+    .metric-label .icon { width: 17px; height: 17px; color: var(--subtle); }
+    .metric-value { display: block; margin-top: 7px; font-size: clamp(1.3rem, 2.4vw, 1.85rem); line-height: 1.18; letter-spacing: -.038em; font-weight: 650; }
+    .metric-note { display: block; margin-top: 6px; color: var(--subtle); font-size: .81rem; }
+    .hero { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(320px, 1fr); gap: 17px; margin-bottom: 17px; }
+    .panel-head { min-height: 63px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 9px 14px; padding: 16px 19px 13px; }
+    .panel-head h2 { font-size: 1.04rem; letter-spacing: -.018em; }
+    .panel-head .caption { font-size: .82rem; color: var(--subtle); }
+    .chart-panel { position: relative; align-self: start; overflow: hidden; }
+    .chart-panel .panel-head { min-height: auto; padding-bottom: 3px; }
+    .ticker-select { max-width: 100%; }
+    .field, .ticker-select { min-height: 37px; padding: 7px 11px; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; font-size: .9rem; }
+    input.field { min-width: 0; }
+    select.field, .ticker-select { appearance: none; padding-right: 30px; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 15px) 50%, calc(100% - 10px) 50%; background-size: 5px 5px; background-repeat: no-repeat; }
+    .ticker-select { background-color: var(--raised); font-size: .88rem; font-weight: 620; }
+    .chart-price { display: flex; align-items: baseline; flex-wrap: wrap; gap: 7px 11px; padding: 6px 19px 9px; }
+    .chart-price strong { font-size: 1.95rem; line-height: 1.12; letter-spacing: -.045em; font-weight: 650; }
+    .chart-price span { font-size: .88rem; }
+    .chart-surface { height: 210px; position: relative; margin: 1px 12px 0; }
+    .chart-surface.large { height: clamp(220px, 45vh, 470px); }
+    .chart-surface svg { display: block; width: 100%; height: 100%; overflow: visible; }
+    .chart-surface.can-pan { cursor: ew-resize; touch-action: pan-y; }
+    .chart-surface svg text { font: .74rem 'Segoe UI', system-ui, sans-serif; fill: var(--subtle); }
+    .chart-surface .gridline { stroke: var(--line); stroke-dasharray: 3 5; }
+    .chart-surface .cursor-line { stroke: #607873; stroke-dasharray: 4 4; }
+    .chart-tooltip { position: absolute; top: 8px; z-index: 1; padding: 6px 9px; border: 1px solid #40534d; border-radius: 7px; background: var(--raised); box-shadow: 0 4px 12px #0003; font-size: .78rem; white-space: nowrap; pointer-events: none; }
+    .chart-tooltip strong { margin-left: 6px; }
+    .chart-foot { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--soft-line); min-height: 53px; padding: 7px 15px; }
+    .segments { display: flex; flex-wrap: wrap; gap: 3px; }
+    .segment { min-width: 34px; min-height: 30px; border: 1px solid transparent; border-radius: 6px; padding: 2px 6px; background: transparent; color: var(--muted); font-size: .82rem; font-weight: 650; }
+    .segment:hover { background: var(--raised); color: var(--text); }
+    .segment[aria-pressed='true'] { color: var(--green); background: #24362e; border-color: #31483c; }
+    .chart-tools .button { min-height: 30px; width: 30px; }
+    .chart-tools { gap: 4px; }
+    .watch-panel .panel-head { border-bottom: 1px solid var(--soft-line); }
+    .watch-list { margin: 0; padding: 0 10px; list-style: none; }
+    .watch-list li + li { border-top: 1px solid var(--soft-line); }
+    .watch-row { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 51px auto; align-items: center; gap: 8px; min-height: 57px; padding: 5px 8px; background: transparent; border: 0; border-radius: 7px; text-align: left; }
+    .watch-row:hover, .watch-row[aria-pressed='true'] { background: #202a28; }
+    .watch-row .value { text-align: right; }
+    .watch-row .value strong, .asset-name strong { display: block; font-size: .9rem; font-weight: 650; }
+    .watch-row .value small, .asset-name small { display: block; margin-top: 3px; font-size: .78rem; }
+    .asset { display: flex; align-items: center; gap: 9px; min-width: 0; }
+    .asset-name { min-width: 0; }
+    .asset-name small { color: var(--subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .asset-mark { display: grid; place-items: center; width: 33px; height: 33px; flex: none; border-radius: 9px; background: var(--asset-bg); color: var(--asset-fg); font-size: .76rem; font-weight: 750; }
+    .spark { display: block; width: 100%; height: 24px; overflow: visible; }
+    .panel-foot { padding: 10px 18px; color: var(--subtle); font-size: .8rem; border-top: 1px solid var(--soft-line); }
+    .table-wrap { overflow: auto; }
+    table { width: 100%; border-collapse: collapse; white-space: nowrap; text-align: left; }
+    th { padding: 9px 14px; background: #1b2324; color: var(--muted); font-size: .82rem; font-weight: 590; }
+    td { padding: 9px 14px; border-top: 1px solid var(--soft-line); font-size: .89rem; }
+    th:first-child, td:first-child { padding-left: 19px; }
+    th:last-child, td:last-child { padding-right: 19px; }
+    .numeric { text-align: right; }
+    .cost { color: #e1efe8; font-weight: 650; }
+    .unit { font-size: .77rem; color: var(--subtle); font-weight: 450; }
+    tbody tr:hover { background: #1b2422; }
+    .link-button { color: var(--green); background: none; border: 0; border-radius: 6px; padding: 6px; font-weight: 650; font-size: .86rem; }
+    .link-button:hover { text-decoration: underline; }
+    .detail-grid { display: grid; gap: 17px; }
+    .actions-cell { text-align: right; }
+    .actions-cell .button { min-height: 32px; width: 32px; }
+    .side-label { display: inline-flex; align-items: center; min-height: 23px; border-radius: 5px; padding: 2px 6px; font-size: .79rem; font-weight: 625; }
+    .side-label.buy { background: #243b30; color: var(--green); }
+    .side-label.sell { background: #402d30; color: var(--red); }
+    .empty { color: var(--muted); text-align: center; padding: 22px !important; }
+    .settings-row { padding: 14px 19px; display: flex; justify-content: space-between; align-items: center; gap: 12px; border-top: 1px solid var(--soft-line); }
+    .settings-row p { font-size: .84rem; color: var(--muted); margin-top: 3px; }
+    .switch { min-width: 42px; width: 42px; height: 24px; accent-color: var(--green); cursor: pointer; }
+    dialog { width: min(500px, calc(100% - 24px)); max-height: calc(100% - 24px); overflow: auto; padding: 0; color: var(--text); background: var(--panel); border: 1px solid #3a4848; border-radius: 16px; box-shadow: 0 22px 70px #0007; }
+    dialog::backdrop { background: #060909b8; }
+    .dialog-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 17px 19px; border-bottom: 1px solid var(--line); }
+    .dialog-head h2 { font-size: 1.22rem; }
+    .dialog-body { padding: 19px; }
+    .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .form-grid label { display: grid; gap: 6px; font-size: .875rem; color: var(--muted); }
+    .form-grid .full { grid-column: 1 / -1; }
+    .dialog-actions { justify-content: flex-end; padding-top: 15px; margin-top: 15px; border-top: 1px solid var(--line); }
+    .trade-preview { padding: 10px 11px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); font-size: .89rem; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 10px; }
+    .trade-preview strong { color: var(--text); }
+    .form-error { color: var(--red); font-size: .88rem; min-height: 1.25em; }
+    .status { position: fixed; z-index: 2; bottom: 20px; right: 20px; max-width: calc(100% - 40px); padding: 11px 14px; border: 1px solid #395046; background: #22332b; border-radius: 9px; color: var(--text); box-shadow: 0 8px 24px #0004; font-size: .9rem; }
+    .status:empty { display: none; }
+    .mini-dialog { width: min(386px, calc(100% - 24px)); }
+    .mini-dialog .watch-list { padding: 0; }
+    .mini-value { margin-bottom: 10px; }
+    .mini-value strong { display: block; margin-top: 5px; font-size: 1.55rem; letter-spacing: -.04em; }
+    @media (max-width: 1180px) {
+      .layout { grid-template-columns: 180px minmax(0, 1fr); }
+      .sidebar { padding-inline: 12px; }
+      .content { padding-inline: 25px; }
+      .hero { grid-template-columns: minmax(0, 1.5fr) minmax(285px, 1fr); }
+    }
+    @media (max-width: 1010px) {
+      .layout { grid-template-columns: 63px minmax(0, 1fr); }
+      .sidebar { align-items: stretch; gap: 24px; padding: 19px 8px; }
+      .brand { margin: 0 auto; }
+      .brand-name, .nav-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+      .nav-button { justify-content: center; padding: 0; }
+    }
+    @media (max-width: 760px) {
+      .layout { display: block; }
+      .sidebar { z-index: 3; position: sticky; top: 0; height: auto; flex-direction: row; align-items: center; justify-content: space-between; gap: 7px; padding: 6px 12px; border-right: 0; border-bottom: 1px solid var(--line); }
+      .brand { margin: 0; }
+      .sidebar-tail { margin: 0; border: 0; padding: 0; }
+      .nav { display: flex; gap: 2px; }
+      .nav-button { width: 40px; min-height: 39px; }
+      .content { padding: 19px 13px 27px; }
+      .page-head { margin-bottom: 17px; }
+      .head-actions { flex-wrap: wrap; justify-content: flex-end; }
+      .hero { grid-template-columns: minmax(0, 1fr); }
+      .metric { padding: 12px 9px; }
+      .metric-label .icon { display: none; }
+      .metric-label { font-size: .78rem; }
+      .metric-value { font-size: clamp(.91rem, 3.15vw, 1.55rem); }
+      .metric-note { font-size: .74rem; }
+      .metrics { gap: 6px; }
+      .chart-surface { height: 195px; }
+    }
+    @media (max-width: 410px) {
+      .head-actions .demo-label { font-size: .72rem; margin-right: 0; }
+      .head-actions .button { min-height: 33px; padding: 5px 8px; }
+      .page-head p { font-size: .78rem; }
+      .form-grid { grid-template-columns: minmax(0, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <svg hidden xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <symbol id="i-brand" viewBox="0 0 24 24"><path d="M3.5 16.5 9.5 10l4 4 7-8M15.5 6h5v5"/></symbol>
+    <symbol id="i-home" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1.3"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.3"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.3"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.3"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 4v15.5h16M7 15l4-5 3 2.5L19 7"/></symbol>
+    <symbol id="i-wallet" viewBox="0 0 24 24"><path d="M4 7V6a2 2 0 0 1 2-2h12v3M4 8a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v11H6a2 2 0 0 1-2-2V8ZM20 11h-5a2 2 0 0 0 0 4h5"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><rect x="5" y="3.5" width="14" height="17" rx="2"/><path d="M8.5 8.5h7M8.5 12h7M8.5 15.5H13"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 6.5h6m4 0h6M4 12h11m4 0h1M4 17.5h2m4 0h10"/><circle cx="12" cy="6.5" r="2"/><circle cx="17" cy="12" r="2"/><circle cx="8" cy="17.5" r="2"/></symbol>
+    <symbol id="i-mini" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="M4 9h16M15 13h2.5v3H15z"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-reset" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 1 2.3 5.7M4 7v5h5"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="m4.5 15-.8 5.3L9 19.5l10-10-4.5-4.5-10 10ZM13 6.5l4.5 4.5m-2.5-6 1.5-1.5a1.4 1.4 0 0 1 2 0l2 2a1.4 1.4 0 0 1 0 2L19 9"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 6.5h16M9 6.5V4h6v2.5m3 0-1 13H7l-1-13M10 10v6m4-6v6"/></symbol>
+  </svg>
+  <div class="layout">
+    <aside class="sidebar" aria-label="Uygulama menüsü">
+      <div class="brand"><span class="brand-mark"><svg class="icon" aria-hidden="true"><use href="#i-brand"/></svg></span><span class="brand-name">Piyasa</span></div>
+      <nav class="nav" aria-label="Ekranlar">
+        <button type="button" class="nav-button" data-view="overview" aria-current="page" title="Genel bakış"><svg class="icon" aria-hidden="true"><use href="#i-home"/></svg><span class="nav-label">Genel bakış</span></button>
+        <button type="button" class="nav-button" data-view="markets" title="Grafikler"><svg class="icon" aria-hidden="true"><use href="#i-chart"/></svg><span class="nav-label">Grafikler</span></button>
+        <button type="button" class="nav-button" data-view="portfolio" title="Portföy"><svg class="icon" aria-hidden="true"><use href="#i-wallet"/></svg><span class="nav-label">Portföy</span></button>
+        <button type="button" class="nav-button" data-view="trades" title="İşlemler"><svg class="icon" aria-hidden="true"><use href="#i-list"/></svg><span class="nav-label">İşlemler</span></button>
+        <button type="button" class="nav-button" data-view="settings" title="Ayarlar"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg><span class="nav-label">Ayarlar</span></button>
+      </nav>
+      <div class="sidebar-tail"><button type="button" class="nav-button" data-action="mini" title="Mini görünüm"><svg class="icon" aria-hidden="true"><use href="#i-mini"/></svg><span class="nav-label">Mini görünüm</span></button></div>
+    </aside>
+    <main class="workspace" id="workspace"></main>
+  </div>
+  <dialog id="trade-dialog" aria-labelledby="trade-title">
+    <div class="dialog-head"><h2 id="trade-title">İşlem ekle</h2><button type="button" class="button plain square" data-close="trade-dialog" aria-label="Kapat"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div>
+    <form class="dialog-body" id="trade-form">
+      <div class="form-grid">
+        <label class="full">Varlık<select class="field" id="trade-asset" name="asset"></select></label>
+        <label>İşlem<select class="field" id="trade-side" name="side"><option value="buy">Alış</option><option value="sell">Satış</option></select></label>
+        <label>Tarih<input class="field" type="date" id="trade-date" name="date" required></label>
+        <label><span id="trade-quantity-label">Miktar</span><input class="field" id="trade-quantity" name="quantity" inputmode="decimal" placeholder="0" required></label>
+        <label>Birim fiyat (₺)<input class="field" id="trade-price" name="price" inputmode="decimal" placeholder="0,00" required></label>
+        <div class="trade-preview full"><span>İşlem tutarı</span><strong class="num" id="trade-total">—</strong><span>İşlem sonrası ort. maliyet</span><strong class="num" id="trade-average">—</strong></div>
+        <p class="form-error full" id="trade-error" aria-live="polite"></p>
+      </div>
+      <div class="dialog-actions"><button class="button" type="button" data-close="trade-dialog">Vazgeç</button><button class="button primary" type="submit">İşlemi kaydet</button></div>
+    </form>
+  </dialog>
+  <dialog id="delete-dialog" aria-labelledby="delete-title">
+    <div class="dialog-head"><h2 id="delete-title">İşlemi sil</h2><button type="button" class="button plain square" data-close="delete-dialog" aria-label="Kapat"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div>
+    <div class="dialog-body"><p id="delete-description"></p><p class="form-error" id="delete-error" aria-live="polite"></p><div class="dialog-actions"><button type="button" class="button" data-close="delete-dialog">Vazgeç</button><button type="button" class="button danger" data-action="delete-confirm">Sil</button></div></div>
+  </dialog>
+  <dialog class="mini-dialog" id="mini-dialog" aria-labelledby="mini-title">
+    <div class="dialog-head"><h2 id="mini-title">Mini görünüm</h2><button type="button" class="button plain square" data-close="mini-dialog" aria-label="Kapat"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div>
+    <div class="dialog-body" id="mini-body"></div>
+  </dialog>
+  <div class="status" id="status" role="status"></div>
+  <script>
+    'use strict';
+
+    const day = 86_400_000;
+    const demoDate = '2026-11-26';
+    const marketTime = Date.parse(`${demoDate}T17:35:00+03:00`);
+    const periods = [
+      ['1G', '1 gün', 1], ['1H', '1 hafta', 7], ['1A', '1 ay', 30],
+      ['3A', '3 ay', 90], ['1Y', '1 yıl', 365], ['Tümü', 'Tüm geçmiş', 0],
+    ];
+    const assets = [
+      {id: 'THYAO', mark: 'TH', name: 'Türk Hava Yolları', type: 'Hisse', unit: 'adet', price: 312.50, gain: .0218, scenario: 1.026, bg: '#402b30', fg: '#f4aeb1'},
+      {id: 'GÜMÜŞ', mark: 'Ag', name: 'Gram gümüş', type: 'Kıymetli metal', unit: 'g', price: 57.82, gain: .0132, scenario: 1.037, bg: '#2c3540', fg: '#bacfe5'},
+      {id: 'ALTIN', mark: 'Au', name: 'Gram altın', type: 'Kıymetli metal', unit: 'g', price: 4728.60, gain: .0084, scenario: .984, bg: '#3b3427', fg: '#f0d697'},
+      {id: 'TUPRS', mark: 'TÜ', name: 'Tüpraş', type: 'Hisse', unit: 'adet', price: 185.28, gain: -.0096, scenario: .975, bg: '#333047', fg: '#d3c1f4'},
+      {id: 'USD/TRY', mark: '$', name: 'ABD doları', type: 'Döviz', unit: 'USD', price: 42.17, gain: .0019, scenario: 1.009, bg: '#283d36', fg: '#b3dfca'},
+    ];
+    const assetsById = new Map(assets.map((asset) => [asset.id, asset]));
+    const sampleTrades = [
+      {id: 1, asset: 'THYAO', side: 'buy', date: '2026-09-08', quantity: 25, price: 264},
+      {id: 2, asset: 'GÜMÜŞ', side: 'buy', date: '2026-09-11', quantity: 120, price: 46.70},
+      {id: 3, asset: 'ALTIN', side: 'buy', date: '2026-09-19', quantity: 3, price: 4108.50},
+      {id: 4, asset: 'TUPRS', side: 'buy', date: '2026-10-02', quantity: 45, price: 192.40},
+      {id: 5, asset: 'GÜMÜŞ', side: 'buy', date: '2026-10-13', quantity: 130, price: 53.50},
+      {id: 6, asset: 'THYAO', side: 'buy', date: '2026-10-21', quantity: 20, price: 295.50},
+      {id: 7, asset: 'ALTIN', side: 'buy', date: '2026-11-06', quantity: 2, price: 4485},
+      {id: 8, asset: 'THYAO', side: 'sell', date: '2026-11-14', quantity: 5, price: 305.75},
+    ];
+    const currency = new Intl.NumberFormat('tr-TR', {style: 'currency', currency: 'TRY'});
+    const quantityFormat = new Intl.NumberFormat('tr-TR', {maximumFractionDigits: 6});
+    const compactFormat = new Intl.NumberFormat('tr-TR', {notation: 'compact', maximumFractionDigits: 1});
+    const pct = new Intl.NumberFormat('tr-TR', {style: 'percent', minimumFractionDigits: 2, maximumFractionDigits: 2, signDisplay: 'exceptZero'});
+    const shortDate = new Intl.DateTimeFormat('tr-TR', {timeZone: 'Europe/Istanbul', day: 'numeric', month: 'short'});
+    const timeFormat = new Intl.DateTimeFormat('tr-TR', {timeZone: 'Europe/Istanbul', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'});
+    const workspace = document.querySelector('#workspace');
+    const tradeForm = document.querySelector('#trade-form');
+    const epsilon = 1e-8;
+    const state = {
+      view: 'overview', selected: 'THYAO', period: '1A', sparkPeriod: '1G', range: [0, 1],
+      trades: sampleTrades.slice(), nextId: 9, editing: null, deleting: null,
+      positions: new Map(), watched: new Set(assets.map((asset) => asset.id)),
+      scenario: false, search: '', filter: 'all',
+    };
+
+    const money = (value) => currency.format(Math.abs(value) < epsilon ? 0 : value);
+    const signedMoney = (value) => (value > epsilon ? '+' : '') + money(value);
+    const direction = (value) => value < -epsilon ? 'loss' : value > epsilon ? 'gain' : 'muted';
+    const icon = (name) => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+    const average = (position) => position && position.quantity > epsilon ? position.cost / position.quantity : null;
+
+    function positionLedger(trades) {
+      const balances = new Map();
+      for (const trade of trades) {
+        const previous = balances.get(trade.asset) || {quantity: 0, cost: 0};
+        if (trade.side === 'buy') {
+          balances.set(trade.asset, {
+            quantity: previous.quantity + trade.quantity,
+            cost: previous.cost + trade.quantity * trade.price,
+          });
+          continue;
+        }
+        const remaining = previous.quantity - trade.quantity;
+        if (remaining < -epsilon) return {error: `${assetsById.get(trade.asset).name} için bu satışta yeterli miktar yok.`};
+        if (remaining <= epsilon) balances.delete(trade.asset);
+        else balances.set(trade.asset, {quantity: remaining, cost: remaining * average(previous)});
+      }
+      return {balances};
+    }
+
+    function makeHistory(asset, seed) {
+      const yesterday = asset.price / (1 + asset.gain);
+      function historicalPrice(age) {
+        const elapsed = age - 1;
+        const amplitude = 1 - Math.exp(-elapsed / 6);
+        const waves = .028 * Math.sin(elapsed / 9 + seed)
+          + .014 * Math.sin(elapsed / 3.1 + seed * .9)
+          + .007 * Math.sin(elapsed * .94 + seed * 2.3)
+          + .003 * Math.sin(elapsed * 2.5 + seed);
+        return yesterday * (1 - elapsed * (.00049 + seed * .00005) + amplitude * waves);
+      }
+      const points = [];
+      for (let age = 420; age > 7; age -= 1) {
+        points.push([marketTime - age * day, historicalPrice(age)]);
+      }
+      for (let hour = 168; hour >= 0; hour -= 1) {
+        const age = hour / 24;
+        const sway = (.0021 * Math.sin(hour * .82 + seed) + .0016 * Math.sin(hour * .28 + seed / 2))
+          * Math.sin(age * Math.PI);
+        const price = age > 1 ? historicalPrice(age) : yesterday * (1 + (1 - age) * asset.gain);
+        points.push([marketTime - age * day, price * (1 + sway)]);
+      }
+      return points;
+    }
+
+    const histories = new Map(assets.map((asset, index) => [asset.id, makeHistory(asset, index)]));
+    const lastPrice = (asset) => asset.price * (state.scenario ? asset.scenario : 1);
+
+    function historyFor(asset, period) {
+      const days = periods.find(([id]) => id === period)[2];
+      const history = histories.get(asset.id);
+      const start = days ? Math.max(0, lowerIndex(history, marketTime - day * days)) : 0;
+      const points = history.slice(start);
+      if (state.scenario) points[points.length - 1] = [marketTime, lastPrice(asset)];
+      return points;
+    }
+
+    function lowerIndex(points, time) {
+      let low = 0;
+      let high = points.length;
+      while (low < high) {
+        const mid = Math.floor((low + high) / 2);
+        if (points[mid][0] < time) low = mid + 1;
+        else high = mid;
+      }
+      return low;
+    }
+
+    function windowedSeries(points) {
+      const first = points[0][0];
+      const span = points.at(-1)[0] - first;
+      const start = Math.min(points.length - 2, lowerIndex(points, first + span * state.range[0]));
+      const lastTime = first + span * state.range[1];
+      const lastIndex = lowerIndex(points, lastTime);
+      const end = Math.max(start + 2, lastIndex + (points[lastIndex]?.[0] === lastTime ? 1 : 0));
+      return points.slice(start, end);
+    }
+
+    const changeFor = (points) => points.at(-1)[1] / points[0][1] - 1;
+
+    function priceSummary() {
+      const rows = assets.filter((asset) => state.positions.has(asset.id)).map((asset) => {
+        const position = state.positions.get(asset.id);
+        const price = lastPrice(asset);
+        const value = price * position.quantity;
+        return {asset, position, price, value, profit: value - position.cost};
+      });
+      const cost = rows.reduce((total, row) => total + row.position.cost, 0);
+      const value = rows.reduce((total, row) => total + row.value, 0);
+      return {rows, cost, value, profit: value - cost};
+    }
+
+    function assetName(asset) {
+      return `<div class="asset"><span class="asset-mark" aria-hidden="true" style="--asset-bg:${asset.bg};--asset-fg:${asset.fg}">${asset.mark}</span><div class="asset-name"><strong>${asset.id}</strong><small>${asset.name}</small></div></div>`;
+    }
+
+    function selectOptions(selected) {
+      return assets.map((asset) => `<option value="${asset.id}"${asset.id === selected ? ' selected' : ''}>${asset.id} · ${asset.name}</option>`).join('');
+    }
+
+    function segmentButtons(value, attribute) {
+      return periods.map(([id, label]) => `<button class="segment" type="button" ${attribute}="${id}" title="${label}" aria-label="${label}" aria-pressed="${id === value}">${id}</button>`).join('');
+    }
+
+    function metrics(summary) {
+      const returnRate = summary.cost ? pct.format(summary.profit / summary.cost) : '—';
+      return `<section class="metrics" aria-label="Portföy özeti">
+        <div class="metric"><span class="metric-label">Portföy değeri${icon('wallet')}</span><strong class="metric-value num" id="portfolio-value">${money(summary.value)}</strong><span class="metric-note">${summary.rows.length} açık pozisyon</span></div>
+        <div class="metric"><span class="metric-label">Toplam maliyet${icon('list')}</span><strong class="metric-value num">${money(summary.cost)}</strong><span class="metric-note">Açık pozisyonların maliyeti</span></div>
+        <div class="metric"><span class="metric-label">Gerçekleşmemiş kâr / zarar${icon('chart')}</span><strong class="metric-value num ${direction(summary.profit)}">${signedMoney(summary.profit)}</strong><span class="metric-note ${direction(summary.profit)}">${returnRate}</span></div>
+      </section>`;
+    }
+
+    function chartPanel(detailed = false) {
+      const tools = detailed ? `<div class="toolbar chart-tools" aria-label="Grafik yakınlaştırma">
+        <button class="button square" type="button" data-action="chart-out" aria-label="Uzaklaştır" title="Uzaklaştır">${icon('minus')}</button>
+        <button class="button square" type="button" data-action="chart-in" aria-label="Yakınlaştır" title="Yakınlaştır">${icon('plus')}</button>
+        <button class="button square" type="button" data-action="chart-reset" aria-label="Grafiği sıfırla" title="Grafiği sıfırla">${icon('reset')}</button></div>` :
+        '<button class="link-button" type="button" data-view="markets">Detaylı grafik</button>';
+      return `<section class="panel chart-panel" aria-labelledby="chart-heading">
+        <header class="panel-head"><h2 id="chart-heading">Fiyat grafiği</h2><select class="ticker-select" id="chart-asset" aria-label="Grafikte gösterilen varlık">${selectOptions(state.selected)}</select></header>
+        <div class="chart-price"><strong class="num" id="chart-price"></strong><span class="num" id="chart-change"></span></div>
+        <div class="chart-surface${detailed ? ' large' : ''}" id="chart-surface">
+          <svg id="chart-svg" role="img" aria-label="Fiyat grafiği"></svg>
+          <span class="chart-tooltip" id="chart-tooltip" hidden></span>
+        </div>
+        <footer class="chart-foot"><div class="segments" aria-label="Grafik zaman aralığı">${segmentButtons(state.period, 'data-period')}</div>${tools}</footer>
+      </section>`;
+    }
+
+    function sparkline(points, delta) {
+      const values = points.map((point) => point[1]);
+      const min = Math.min(...values);
+      const span = Math.max(.0001, Math.max(...values) - min);
+      const line = values.map((value, index) => `${index ? 'L' : 'M'}${(2 + 48 * index / (values.length - 1)).toFixed(2)} ${(21 - 17 * (value - min) / span).toFixed(2)}`).join(' ');
+      const color = delta < 0 ? 'var(--red)' : 'var(--green)';
+      return `<svg class="spark" viewBox="0 0 52 24" aria-hidden="true"><path d="${line}" fill="none" stroke="${color}" stroke-width="1.35" stroke-linejoin="round" stroke-linecap="round"/></svg>`;
+    }
+
+    function watchRows() {
+      return assets.filter((asset) => state.watched.has(asset.id)).map((asset) => {
+        const points = historyFor(asset, state.sparkPeriod);
+        const delta = changeFor(points);
+        return `<li><button class="watch-row" type="button" data-chart-asset="${asset.id}" aria-pressed="${asset.id === state.selected}">${assetName(asset)}${sparkline(points, delta)}<span class="value num"><strong>${money(lastPrice(asset))}</strong><small class="${direction(delta)}">${pct.format(delta)}</small></span></button></li>`;
+      }).join('') || '<li class="empty">İzleme listen boş.</li>';
+    }
+
+    function watchPanel() {
+      const period = periods.find(([id]) => id === state.sparkPeriod)[1];
+      return `<section class="panel watch-panel" aria-labelledby="watch-heading"><header class="panel-head"><h2 id="watch-heading">İzleme listesi</h2><span class="caption">${period}</span></header><ul class="watch-list">${watchRows()}</ul></section>`;
+    }
+
+    function marketDetails() {
+      return `<div class="detail-grid">${chartPanel(true)}<section class="metrics" aria-label="Gösterilen grafik aralığının özeti">
+        <div class="metric"><span class="metric-label">En düşük</span><strong class="metric-value num" id="range-low"></strong></div>
+        <div class="metric"><span class="metric-label">En yüksek</span><strong class="metric-value num" id="range-high"></strong></div>
+        <div class="metric"><span class="metric-label">Aralık değişimi</span><strong class="metric-value num" id="range-change"></strong></div>
+      </section></div>`;
+    }
+
+    function holdingsTable(summary, overview = false) {
+      const rows = summary.rows.map(({asset, position, price, value, profit}) => `<tr>
+        <td>${assetName(asset)}</td><td class="numeric num">${quantityFormat.format(position.quantity)} <span class="unit">${asset.unit}</span></td>
+        <td class="numeric num cost" data-cost="${asset.id}">${money(average(position))} <span class="unit">/ ${asset.unit}</span></td>
+        <td class="numeric num">${money(price)}</td><td class="numeric num">${money(value)}</td>
+        <td class="numeric num ${direction(profit)}">${signedMoney(profit)}</td></tr>`).join('');
+      return `<section class="panel" aria-labelledby="holdings-heading"><header class="panel-head"><h2 id="holdings-heading">Açık pozisyonlar</h2>${overview ? '<button class="link-button" type="button" data-view="portfolio">Portföyü aç</button>' : ''}</header>
+        <div class="table-wrap" tabindex="0" aria-label="Pozisyonlar tablosu"><table><thead><tr><th scope="col">Varlık</th><th scope="col" class="numeric">Miktar</th><th scope="col" class="numeric">Ort. maliyet</th><th scope="col" class="numeric">Son fiyat</th><th scope="col" class="numeric">Piyasa değeri</th><th scope="col" class="numeric">Kâr / zarar</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="6" class="empty">Açık pozisyonun yok.</td></tr>'}</tbody></table></div>
+        ${overview ? '' : '<footer class="panel-foot">Ortalama maliyet, alış ve satış kayıtlarından hesaplanır. Kısmi satışta kalan birimlerin ortalama maliyeti aynı kalır.</footer>'}</section>`;
+    }
+
+    function tradesPanel() {
+      return `<section class="panel" aria-labelledby="trade-list-title"><header class="panel-head"><h2 id="trade-list-title">İşlem geçmişi</h2>
+        <div class="toolbar"><input type="search" class="field" id="trade-search" placeholder="Varlık veya işlem ara" aria-label="İşlem ara"><select id="trade-filter" class="field" aria-label="İşlem türünü filtrele"><option value="all">Tüm işlemler</option><option value="buy">Alış</option><option value="sell">Satış</option></select></div></header>
+        <div class="table-wrap" tabindex="0" aria-label="İşlem geçmişi tablosu"><table><thead><tr><th scope="col">Varlık</th><th scope="col">Tarih</th><th scope="col">İşlem</th><th scope="col" class="numeric">Miktar</th><th scope="col" class="numeric">Birim fiyat</th><th scope="col" class="numeric">Tutar</th><th scope="col" class="numeric">Düzenle</th></tr></thead><tbody id="trade-rows"></tbody></table></div><footer class="panel-foot" id="trade-count" aria-live="polite"></footer></section>`;
+    }
+
+    function drawTrades() {
+      const table = document.querySelector('#trade-rows');
+      if (!table) return;
+      const query = state.search.trim().toLocaleLowerCase('tr');
+      const rows = state.trades.filter((trade) => {
+        if (state.filter !== 'all' && trade.side !== state.filter) return false;
+        const asset = assetsById.get(trade.asset);
+        const side = trade.side === 'buy' ? 'Alış' : 'Satış';
+        return `${asset.id} ${asset.name} ${side} ${trade.date}`.toLocaleLowerCase('tr').includes(query);
+      }).sort((a, b) => b.date.localeCompare(a.date) || b.id - a.id);
+      table.innerHTML = rows.map((trade) => {
+        const asset = assetsById.get(trade.asset);
+        return `<tr><td>${assetName(asset)}</td><td>${shortDate.format(Date.parse(trade.date))}</td><td><span class="side-label ${trade.side}">${trade.side === 'buy' ? 'Alış' : 'Satış'}</span></td>
+          <td class="numeric num">${quantityFormat.format(trade.quantity)} <span class="unit">${asset.unit}</span></td><td class="numeric num">${money(trade.price)}</td><td class="numeric num">${money(trade.price * trade.quantity)}</td>
+          <td class="actions-cell"><button type="button" class="button plain square" data-edit="${trade.id}" aria-label="${asset.id} işlemini düzenle" title="Düzenle">${icon('edit')}</button><button type="button" class="button plain square" data-delete="${trade.id}" aria-label="${asset.id} işlemini sil" title="Sil">${icon('trash')}</button></td></tr>`;
+      }).join('') || '<tr><td colspan="7" class="empty">Eşleşen işlem yok.</td></tr>';
+      document.querySelector('#trade-count').textContent = `${rows.length} / ${state.trades.length} işlem`;
+    }
+
+    function settingsPanels() {
+      return `<div class="detail-grid"><section class="panel" aria-labelledby="mini-settings"><header class="panel-head"><h2 id="mini-settings">Mini grafik zaman aralığı</h2></header>
+        <div class="settings-row"><div><strong>Zaman aralığı</strong><p>İzleme listesinde ve mini görünümde kullanılır.</p></div><div class="segments" aria-label="Mini grafik zaman aralığı">${segmentButtons(state.sparkPeriod, 'data-spark-period')}</div></div></section>
+        <section class="panel" aria-labelledby="watch-settings"><header class="panel-head"><h2 id="watch-settings">İzleme listesi</h2></header>${assets.map((asset) => `<label class="settings-row">${assetName(asset)}<input class="switch" type="checkbox" data-watch="${asset.id}" aria-label="${asset.name} izle"${state.watched.has(asset.id) ? ' checked' : ''}></label>`).join('')}</section></div>`;
+    }
+
+    const headings = {
+      overview: ['Piyasa özeti', '26 Kasım 2026 Perşembe · 17:35'],
+      markets: ['Grafikler', '26 Kasım 2026 Perşembe · 17:35'],
+      portfolio: ['Portföy'],
+      trades: ['İşlemler'],
+      settings: ['Ayarlar'],
+    };
+
+    let chartObserver;
+    let chartFrame = 0;
+    let pointerDrag = null;
+    let chartGeometry = null;
+
+    function renderPage() {
+      const [title, detail] = headings[state.view];
+      const summary = priceSummary();
+      const views = {
+        overview: () => `${metrics(summary)}<div class="hero">${chartPanel()}${watchPanel()}</div>${holdingsTable(summary, true)}`,
+        markets: marketDetails,
+        portfolio: () => `${metrics(summary)}${holdingsTable(summary)}`,
+        trades: tradesPanel,
+        settings: settingsPanels,
+      };
+      const priceScenario = state.view === 'portfolio' ? `<button class="button" type="button" data-action="scenario" aria-pressed="${state.scenario}">${state.scenario ? 'Fiyatları geri al' : 'Fiyatları simüle et'}</button>` : '';
+      workspace.innerHTML = `<div class="content"><header class="page-head"><div><h1>${title}</h1>${detail ? `<p>${detail}</p>` : ''}</div><div class="head-actions"><span class="demo-label" title="Prototip yalnızca örnek verilerle çalışır"><span class="demo-dot"></span>Örnek veri</span>${priceScenario}<button class="button primary" type="button" data-action="trade">${icon('plus')} İşlem ekle</button></div></header>${views[state.view]()}</div>`;
+      if (chartObserver) chartObserver.disconnect();
+      chartGeometry = null;
+      pointerDrag = null;
+      const surface = workspace.querySelector('#chart-surface');
+      if (surface) {
+        chartObserver = new ResizeObserver(queueChart);
+        chartObserver.observe(surface);
+        surface.addEventListener('pointermove', handleChartMove);
+        surface.addEventListener('pointerdown', handleChartDown);
+        surface.addEventListener('pointerup', finishChartDrag);
+        surface.addEventListener('pointercancel', finishChartDrag);
+        surface.addEventListener('pointerleave', () => hideCursor(surface));
+        drawChart();
+      }
+      if (state.view === 'trades') {
+        document.querySelector('#trade-search').value = state.search;
+        document.querySelector('#trade-filter').value = state.filter;
+        drawTrades();
+      }
+    }
+
+    function navigate(view) {
+      if (view === state.view) return;
+      state.view = view;
+      document.querySelectorAll('.nav [data-view]').forEach((button) => {
+        if (button.dataset.view === view) button.setAttribute('aria-current', 'page');
+        else button.removeAttribute('aria-current');
+      });
+      renderPage();
+      window.scrollTo(0, 0);
+    }
+
+    function queueChart() {
+      if (!chartFrame) chartFrame = requestAnimationFrame(() => {
+        chartFrame = 0;
+        drawChart();
+      });
+    }
+
+    function drawChart() {
+      const surface = workspace.querySelector('#chart-surface');
+      if (!surface) return;
+      const svg = surface.querySelector('svg');
+      const bounds = surface.getBoundingClientRect();
+      const width = Math.round(bounds.width);
+      const height = Math.round(bounds.height);
+      if (width < 1 || height < 1) return;
+      const asset = assetsById.get(state.selected);
+      const series = windowedSeries(historyFor(asset, state.period));
+      const delta = changeFor(series);
+      const values = series.map((point) => point[1]);
+      const min = Math.min(...values);
+      const max = Math.max(...values);
+      const yRoom = Math.max(.01, (max - min) * .13);
+      const start = series[0][0];
+      const duration = series.at(-1)[0] - start;
+      const left = 10;
+      const right = width - 54;
+      const top = 15;
+      const bottom = height - 29;
+      const x = (time) => left + (right - left) * (time - start) / duration;
+      const y = (price) => bottom - (bottom - top) * (price - min + yRoom) / (max - min + 2 * yRoom);
+      const stroke = delta < 0 ? 'var(--red)' : 'var(--green)';
+      const line = series.map(([time, price], index) => `${index ? 'L' : 'M'}${x(time).toFixed(2)} ${y(price).toFixed(2)}`).join(' ');
+      const path = `${line} L${right} ${bottom} L${left} ${bottom} Z`;
+      let yTicks = '';
+      for (let index = 0; index <= 4; index += 1) {
+        const yy = top + (bottom - top) * index / 4;
+        const value = max + yRoom - (max - min + 2 * yRoom) * index / 4;
+        const label = value >= 1000 ? compactFormat.format(value) : quantityFormat.format(Math.round(value * 100) / 100);
+        yTicks += `<line class="gridline" x1="${left}" x2="${right}" y1="${yy}" y2="${yy}"/><text x="${right + 8}" y="${yy + 4}">${label}</text>`;
+      }
+      let xTicks = '';
+      const tickCount = width < 380 ? 3 : 5;
+      for (let index = 0; index < tickCount; index += 1) {
+        const fraction = index / (tickCount - 1);
+        const position = start + duration * fraction;
+        const anchor = index === 0 ? 'start' : index === tickCount - 1 ? 'end' : 'middle';
+        const label = duration <= 1.2 * day ? timeFormat.format(position) : shortDate.format(position);
+        xTicks += `<text x="${x(position)}" y="${height - 8}" text-anchor="${anchor}">${label}</text>`;
+      }
+      svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+      svg.setAttribute('aria-label', `${asset.name}, ${money(lastPrice(asset))}, gösterilen aralıkta ${pct.format(delta)}`);
+      svg.innerHTML = `<defs><linearGradient id="chart-fill" x1="0" y1="0" x2="0" y2="1" gradientUnits="objectBoundingBox"><stop offset="0" stop-color="${stroke}" stop-opacity=".22"/><stop offset="1" stop-color="${stroke}" stop-opacity=".01"/></linearGradient></defs>
+        ${yTicks}${xTicks}<path d="${path}" fill="url(#chart-fill)"/><path d="${line}" fill="none" stroke="${stroke}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="${right}" cy="${y(values.at(-1))}" r="3" stroke="var(--panel)" stroke-width="1.3" fill="${stroke}"/>
+        <g id="chart-cursor" hidden><line class="cursor-line" y1="${top}" y2="${bottom}"/><circle r="4" fill="${stroke}" stroke="var(--panel)" stroke-width="1.4"/></g>`;
+      chartGeometry = {series, x, y, start, duration, left, right};
+      hideCursor(surface);
+      surface.classList.toggle('can-pan', state.range[1] - state.range[0] < .999);
+      document.querySelector('#chart-asset').value = asset.id;
+      document.querySelector('#chart-price').textContent = money(lastPrice(asset));
+      const change = document.querySelector('#chart-change');
+      change.className = `num ${direction(delta)}`;
+      change.textContent = pct.format(delta);
+      workspace.querySelectorAll('[data-chart-asset]').forEach((button) => button.setAttribute('aria-pressed', button.dataset.chartAsset === asset.id));
+      workspace.querySelectorAll('[data-period]').forEach((button) => button.setAttribute('aria-pressed', button.dataset.period === state.period));
+      const zoomOut = workspace.querySelector('[data-action="chart-out"]');
+      if (zoomOut) {
+        const span = state.range[1] - state.range[0];
+        document.querySelector('#range-low').textContent = money(min);
+        document.querySelector('#range-high').textContent = money(max);
+        const rangeChange = document.querySelector('#range-change');
+        rangeChange.textContent = pct.format(delta);
+        rangeChange.className = `metric-value num ${direction(delta)}`;
+        zoomOut.disabled = span >= .999;
+        workspace.querySelector('[data-action="chart-reset"]').disabled = span >= .999;
+        workspace.querySelector('[data-action="chart-in"]').disabled = span <= .101;
+      }
+    }
+
+    function hideCursor(surface) {
+      surface.querySelector('#chart-tooltip').hidden = true;
+      surface.querySelector('#chart-cursor')?.setAttribute('hidden', '');
+    }
+
+    function handleChartMove(event) {
+      if (!chartGeometry) return;
+      const surface = event.currentTarget;
+      const {series, x, y, start, duration, left, right} = chartGeometry;
+      if (pointerDrag?.id === event.pointerId) {
+        const span = pointerDrag.end - pointerDrag.start;
+        const movement = (event.clientX - pointerDrag.x) * span / (right - left);
+        const newStart = Math.min(1 - span, Math.max(0, pointerDrag.start - movement));
+        state.range = [newStart, newStart + span];
+        queueChart();
+        return;
+      }
+      const pointer = event.clientX - surface.getBoundingClientRect().left;
+      if (pointer < left || pointer > right) { hideCursor(surface); return; }
+      const time = start + duration * (pointer - left) / (right - left);
+      const next = Math.min(series.length - 1, lowerIndex(series, time));
+      const before = Math.max(0, next - 1);
+      const point = Math.abs(series[next][0] - time) < Math.abs(series[before][0] - time) ? series[next] : series[before];
+      const cursor = surface.querySelector('#chart-cursor');
+      const line = cursor.querySelector('line');
+      const dot = cursor.querySelector('circle');
+      const xx = x(point[0]);
+      line.setAttribute('x1', xx);
+      line.setAttribute('x2', xx);
+      dot.setAttribute('cx', xx);
+      dot.setAttribute('cy', y(point[1]));
+      cursor.removeAttribute('hidden');
+      const tooltip = surface.querySelector('#chart-tooltip');
+      const date = duration <= 1.2 * day ? timeFormat.format(point[0]) : shortDate.format(point[0]);
+      tooltip.innerHTML = `${date} <strong>${money(point[1])}</strong>`;
+      tooltip.hidden = false;
+      tooltip.style.left = `${Math.max(0, Math.min(surface.clientWidth - tooltip.offsetWidth, xx + 8))}px`;
+    }
+
+    function handleChartDown(event) {
+      if (event.button !== 0 || state.range[1] - state.range[0] >= .999) return;
+      pointerDrag = {id: event.pointerId, x: event.clientX, start: state.range[0], end: state.range[1]};
+      event.currentTarget.setPointerCapture(event.pointerId);
+      hideCursor(event.currentTarget);
+    }
+
+    function finishChartDrag(event) {
+      if (pointerDrag?.id === event.pointerId) pointerDrag = null;
+    }
+
+    function zoomChart(inward) {
+      const [start, end] = state.range;
+      const span = Math.max(.1, Math.min(1, (end - start) * (inward ? .65 : 1 / .65)));
+      const begin = Math.min(1 - span, Math.max(0, (start + end - span) / 2));
+      state.range = [begin, begin + span];
+      drawChart();
+    }
+
+    function selectAsset(id) {
+      if (state.selected !== id) state.range = [0, 1];
+      state.selected = id;
+      drawChart();
+    }
+
+    let noticeTimer;
+    function announce(message) {
+      const status = document.querySelector('#status');
+      status.textContent = message;
+      clearTimeout(noticeTimer);
+      noticeTimer = setTimeout(() => { status.textContent = ''; }, 4000);
+    }
+
+    function amount(input) {
+      let normalized = input.trim().replaceAll(' ', '');
+      if (normalized.includes(',')) normalized = normalized.replaceAll('.', '').replace(',', '.');
+      if (!/^\d+(?:\.\d*)?$/.test(normalized)) return NaN;
+      const value = Number(normalized);
+      return value > epsilon && value <= 1e9 ? value : NaN;
+    }
+
+    function tradeValues() {
+      return {
+        id: state.editing ?? state.nextId, asset: tradeForm.elements.asset.value, side: tradeForm.elements.side.value,
+        date: tradeForm.elements.date.value, quantity: amount(tradeForm.elements.quantity.value), price: amount(tradeForm.elements.price.value),
+      };
+    }
+
+    function tradesWith(trade) {
+      return state.editing === null ? [...state.trades, trade] : state.trades.map((saved) => saved.id === state.editing ? trade : saved);
+    }
+
+    function updateTradePreview() {
+      const trade = tradeValues();
+      const asset = assetsById.get(trade.asset);
+      document.querySelector('#trade-quantity-label').textContent = `Miktar (${asset.unit})`;
+      const valid = Number.isFinite(trade.quantity * trade.price);
+      const result = valid ? positionLedger(tradesWith(trade)) : {};
+      const next = average(result.balances?.get(trade.asset));
+      document.querySelector('#trade-total').textContent = valid ? money(trade.quantity * trade.price) : '—';
+      document.querySelector('#trade-average').textContent = next === null ? '—' : `${money(next)} / ${asset.unit}`;
+      document.querySelector('#trade-error').textContent = result.error || '';
+    }
+
+    function openTrade(id = null) {
+      const existing = state.trades.find((trade) => trade.id === id);
+      state.editing = existing?.id ?? null;
+      tradeForm.reset();
+      tradeForm.elements.asset.innerHTML = selectOptions(existing?.asset ?? state.selected);
+      tradeForm.elements.date.value = existing?.date ?? demoDate;
+      if (existing) {
+        tradeForm.elements.side.value = existing.side;
+        tradeForm.elements.quantity.value = String(existing.quantity).replace('.', ',');
+        tradeForm.elements.price.value = String(existing.price).replace('.', ',');
+      }
+      document.querySelector('#trade-title').textContent = existing ? 'İşlemi düzenle' : 'İşlem ekle';
+      updateTradePreview();
+      document.querySelector('#trade-dialog').showModal();
+    }
+
+    function openDelete(id) {
+      const trade = state.trades.find((entry) => entry.id === id);
+      if (!trade) return;
+      state.deleting = id;
+      document.querySelector('#delete-description').textContent = `${trade.asset} ${trade.side === 'buy' ? 'alış' : 'satış'} kaydını silmek istiyor musun?`;
+      document.querySelector('#delete-error').textContent = '';
+      document.querySelector('#delete-dialog').showModal();
+    }
+
+    function deleteTrade() {
+      const candidate = state.trades.filter((trade) => trade.id !== state.deleting);
+      const result = positionLedger(candidate);
+      if (result.error) { document.querySelector('#delete-error').textContent = result.error; return; }
+      state.trades = candidate;
+      state.positions = result.balances;
+      document.querySelector('#delete-dialog').close();
+      drawTrades();
+      document.querySelector('#trade-search')?.focus();
+      announce('İşlem silindi. Portföy maliyeti güncellendi.');
+    }
+
+    function openMini() {
+      const {value, profit} = priceSummary();
+      document.querySelector('#mini-body').innerHTML = `<div class="mini-value"><span class="muted">Portföy değeri</span><strong class="num">${money(value)}</strong><span class="num ${direction(profit)}">${signedMoney(profit)}</span></div><ul class="watch-list">${watchRows()}</ul>`;
+      document.querySelector('#mini-dialog').showModal();
+    }
+
+    tradeForm.addEventListener('input', updateTradePreview);
+    tradeForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const trade = tradeValues();
+      const error = document.querySelector('#trade-error');
+      if (!Number.isFinite(trade.quantity * trade.price)) {
+        error.textContent = 'Miktar ve birim fiyat sıfırdan büyük olmalı.';
+        return;
+      }
+      const candidate = tradesWith(trade);
+      const result = positionLedger(candidate);
+      if (result.error) { error.textContent = result.error; return; }
+      state.trades = candidate;
+      state.positions = result.balances;
+      if (state.editing === null) state.nextId += 1;
+      document.querySelector('#trade-dialog').close();
+      if (state.view === 'trades') drawTrades();
+      else renderPage();
+      workspace.querySelector('[data-action="trade"]').focus({preventScroll: true});
+      announce('İşlem kaydedildi. Portföy maliyeti güncellendi.');
+    });
+
+    document.addEventListener('click', (event) => {
+      const button = event.target.closest('button');
+      if (!button) return;
+      const {view, action, close, chartAsset, period, sparkPeriod, edit, delete: remove} = button.dataset;
+      if (view) { navigate(view); return; }
+      if (close) { document.getElementById(close).close(); return; }
+      if (chartAsset) {
+        if (button.closest('#mini-dialog')) {
+          document.querySelector('#mini-dialog').close();
+          navigate('markets');
+        }
+        selectAsset(chartAsset);
+        return;
+      }
+      if (period) { state.period = period; state.range = [0, 1]; drawChart(); return; }
+      if (sparkPeriod) {
+        state.sparkPeriod = sparkPeriod;
+        workspace.querySelectorAll('[data-spark-period]').forEach((item) => item.setAttribute('aria-pressed', item === button));
+        return;
+      }
+      if (edit) { openTrade(Number(edit)); return; }
+      if (remove) { openDelete(Number(remove)); return; }
+      switch (action) {
+        case 'trade': openTrade(); break;
+        case 'mini': openMini(); break;
+        case 'delete-confirm': deleteTrade(); break;
+        case 'chart-in': zoomChart(true); break;
+        case 'chart-out': zoomChart(false); break;
+        case 'chart-reset': state.range = [0, 1]; drawChart(); break;
+        case 'scenario':
+          state.scenario = !state.scenario;
+          renderPage();
+          workspace.querySelector('[data-action="scenario"]').focus({preventScroll: true});
+          announce('Fiyatlar değişti. Ortalama maliyet aynı kaldı.');
+          break;
+      }
+    });
+
+    workspace.addEventListener('input', ({target}) => {
+      if (target.id === 'trade-search') { state.search = target.value; drawTrades(); }
+    });
+    workspace.addEventListener('change', ({target}) => {
+      if (target.id === 'chart-asset') selectAsset(target.value);
+      if (target.id === 'trade-filter') { state.filter = target.value; drawTrades(); }
+      if (target.dataset.watch) {
+        if (target.checked) state.watched.add(target.dataset.watch);
+        else state.watched.delete(target.dataset.watch);
+      }
+    });
+
+    state.positions = positionLedger(state.trades).balances;
+    renderPage();
+  </script>
+</body>
+</html>
