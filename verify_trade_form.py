@@ -90,6 +90,22 @@ class TestQuickTradeForm(unittest.TestCase):
         error.assert_called_once()
         self.assertEqual(self.manager.transactions, [])
 
+    def test_turkish_grouping_commission_calendar_and_invalid_date(self):
+        form = self.open()
+        form.var_date.set("31-02-2026")
+        form.var_amount.set("1.000")
+        form.var_entered_total.set("25,00")
+        form.var_fee.set("12,50")
+        self.wait_for_preview(lambda: "tarih" in form.preview_error.get().lower())
+        form._open_calendar()
+        form._calendar_window._pick(form._calendar_window.selected)
+        self.wait_for_preview(lambda: form.preview_net.get() == "₺25.012,50")
+        self.assertEqual(form.preview_total.get(), "₺25.000,00")
+        form.save()
+        saved = TransactionManager(self.filename).transactions[0]
+        self.assertEqual(saved["quantity"], 1000)
+        self.assertEqual(saved["fee_tl"], 12.5)
+
 
 if __name__ == "__main__":
     unittest.main()

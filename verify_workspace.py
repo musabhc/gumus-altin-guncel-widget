@@ -85,6 +85,45 @@ class TestDesktopWorkspace(unittest.TestCase):
         self.assertIsNone(self.app.tm.get_average_cost("thyao"))
         self.assertEqual(self.app.tm.get_average_cost("gumus_tl"), 40)
 
+    def test_detail_graph_retains_exact_widget_period(self):
+        view = self.app.open_workspace("markets", "thyao", period=6 * 3600)
+        chart = view.charts["markets"][1]
+        self.assertEqual(chart.period.get(), 6 * 3600)
+        self.assertEqual(chart.instrument["key"], "thyao")
+        view.show_view("overview")
+        self.assertEqual(view.charts["overview"][1].period_choice.get(), "6 sa")
+
+    def test_portfolio_counts_closed_sales_and_shows_weight(self):
+        self.app.tm.save({
+            "date": "12-09-2025", "instrument_key": "thyao", "instrument_label": "THYAO",
+            "quantity": 10, "total_tl": 3100, "action": "sell", "currency": "TL",
+        })
+        view = self.app.open_workspace("portfolio")
+        self.assertEqual(view.metrics["portfolio"][3][0].cget("text"), "+₺300,00")
+        self.assertFalse(view.holdings["portfolio"].exists("thyao"))
+        self.assertEqual(view.holdings["portfolio"].set("gumus_tl", "weight"), "%100,0")
+
+    def test_transaction_asset_and_date_filter_can_be_combined(self):
+        view = self.app.open_workspace("trades")
+        view.trade_asset.set("THYAO")
+        view.trade_start.set("01-09-2025")
+        view.trade_end.set("30-09-2025")
+        view._apply_trade_dates()
+        self.assertEqual([row["asset"] for row in view.trade_table.rows], ["THYAO"])
+
+        view.trade_end.set("31-02-2025")
+        view._apply_trade_dates()
+        self.assertIn("GG-AA-YYYY", view.trade_date_message.cget("text"))
+        self.assertEqual([row["asset"] for row in view.trade_table.rows], ["THYAO"])
+
+    def test_unreadable_ledger_is_not_shown_as_zero_portfolio(self):
+        self.records.write_text('{"incomplete":true}', encoding="utf-8")
+        self.app.tm = main.TransactionManager(os.fspath(self.records))
+        view = self.app.open_workspace("portfolio")
+        self.assertIn("okunamadı", view.status_label.cget("text"))
+        self.assertEqual(view.metrics["portfolio"][0][0].cget("text"), "—")
+        self.assertEqual(view.metrics["portfolio"][3][0].cget("text"), "—")
+
 
 if __name__ == "__main__":
     unittest.main()

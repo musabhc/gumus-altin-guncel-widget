@@ -1,29 +1,39 @@
-"""Deterministic boundary checks for the widget's market-hours rule."""
+"""Deterministic checks for provider sessions and application updates."""
 
-from datetime import datetime
 from unittest import TestCase, main as unittest_main
 from unittest.mock import patch
 
 import main
+from market_quotes import quote_time, session_from_metadata
 
 
 class TestMarketHours(TestCase):
-    CASES = (
-        ("Friday evening", datetime(2026, 10, 2, 23, 30), False),
-        ("Saturday before close", datetime(2026, 10, 3, 0, 59), False),
-        ("Saturday at close", datetime(2026, 10, 3, 1, 0), True),
-        ("Sunday", datetime(2026, 10, 4, 12, 0), True),
-        ("Monday before open", datetime(2026, 10, 5, 1, 59), True),
-        ("Monday at open", datetime(2026, 10, 5, 2, 0), False),
-        ("Tuesday", datetime(2026, 10, 6, 12, 0), False),
-    )
+    def test_each_provider_exposes_its_own_session(self):
+        now = quote_time(1_760_000_000)
+        regular = {"currentTradingPeriod": {"regular": {"start": 1_759_999_999, "end": 1_760_000_001}}}
+        self.assertEqual(session_from_metadata(regular, now), "REGULAR")
+        self.assertEqual(session_from_metadata({"marketState": "CLOSED"}, now), "CLOSED")
+        self.assertEqual(session_from_metadata({}, now), "")
 
-    def test_market_boundaries(self):
-        widget = main.PiyasaWidget.__new__(main.PiyasaWidget)
-        for label, current_time, expected_closed in self.CASES:
-            with self.subTest(label=label), patch.object(main, "datetime") as mocked_datetime:
-                mocked_datetime.now.return_value = current_time
-                self.assertEqual(widget.is_market_closed(), expected_closed)
+
+class TestUpdateManager(TestCase):
+    def test_numeric_version_comparison(self):
+        manager = main.UpdateManager("1.0.99", main.GITHUB_REPO)
+        url = f"https://github.com/{main.GITHUB_REPO}/releases/download/v1.0.100/PiyasaWidget_Setup.exe"
+        with patch.object(main.requests, "get") as get:
+            response = get.return_value
+            response.status_code = 200
+            response.json.return_value = {"tag_name": "v1.0.100", "assets": [
+                {"name": "PiyasaWidget_Setup.exe", "browser_download_url": url},
+            ]}
+            self.assertEqual(manager.check_for_updates(), (True, "1.0.100", url))
+            get.assert_called_once_with(manager.api_url, timeout=(5, 15))
+
+    def test_network_error_is_distinct_from_up_to_date(self):
+        manager = main.UpdateManager("1.0.99", main.GITHUB_REPO)
+        with patch.object(main.requests, "get", side_effect=main.requests.ConnectionError):
+            with self.assertRaisesRegex(RuntimeError, "bilgisi alınamadı"):
+                manager.check_for_updates()
 
 
 if __name__ == "__main__":

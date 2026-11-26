@@ -346,6 +346,7 @@ class IsolatedTkSmokeTest(unittest.TestCase):
             [
                 ("command", "Portföyü yönet"),
                 ("command", "İşlemleri içe aktar"),
+                ("command", "Veri ve yedek"),
                 ("separator", None),
                 ("check", "Windows ile başlat"),
                 ("check", "Her zaman üstte"),
@@ -353,6 +354,7 @@ class IsolatedTkSmokeTest(unittest.TestCase):
                 ("choice", "Mini grafik zaman aralığı"),
                 ("separator", None),
                 ("command", "Detayları aç"),
+                ("command", "İstatistikler"),
                 ("command", "İzlenenleri düzenle"),
                 ("command", "Güncellemeleri kontrol et"),
                 ("separator", None),
@@ -432,11 +434,11 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         for width in (368, 480):
             self.app.root.geometry(f"{width}x600")
             self.app.root.update()
-            widgets = (self.app.btn_prev, self.app.lbl_time, self.app.btn_next,
-                       self.app.lbl_market_status, self.app.lbl_market_label)
+            widgets = (self.app.lbl_time, self.app.lbl_market_status, self.app.lbl_market_label)
             centers = [widget.winfo_rooty() + widget.winfo_height() / 2 for widget in widgets]
             self.assertLessEqual(max(centers) - min(centers), 1)
         self.assertEqual(set(self.app.footer_buttons), {"settings", "refresh"})
+        self.assertEqual([button.cget("text") for button in self.app.widget_nav.values()], ["Özet", "İzleme"])
         for button in self.app.footer_buttons.values():
             self.assertIsNone(button.label)
             self.assertEqual(int(button.cget("width")), 32)
@@ -528,28 +530,19 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         self.app.root.update()
         expected_position = (initial_position[0]+24, initial_position[1]+16)
         self.assertEqual((self.app.root.winfo_x(), self.app.root.winfo_y()), expected_position)
-        for jitter in (0, 2, -2):
-            for button, page in ((self.app.btn_next, 1), (self.app.btn_next, 2),
-                                 (self.app.btn_prev, 1), (self.app.btn_prev, 0)):
-                x, y = button.winfo_rootx()+14, button.winfo_rooty()+14
-                button.event_generate("<ButtonPress-1>", x=14, y=14, rootx=x, rooty=y)
-                if jitter:
-                    button.event_generate("<B1-Motion>", x=14+jitter, y=14,
-                                          rootx=x+jitter, rooty=y)
-                button.event_generate("<ButtonRelease-1>", x=14+jitter, y=14,
-                                      rootx=x+jitter, rooty=y)
-                self.app.root.update()
-                self.assertEqual(self.app.current_page, page)
-                self.assertEqual((self.app.root.winfo_x(), self.app.root.winfo_y()), expected_position)
-                self.assertIsNone(self.app._window_move_origin)
-        # Dragging off a button cancels activation and still cannot move the app.
-        button = self.app.btn_next
-        x, y = button.winfo_rootx()+14, button.winfo_rooty()+14
-        button.event_generate("<ButtonPress-1>", x=14, y=14, rootx=x, rooty=y)
-        button.event_generate("<B1-Motion>", x=34, y=14, rootx=x+20, rooty=y)
-        button.event_generate("<ButtonRelease-1>", x=14, y=14, rootx=x, rooty=y)
-        self.assertEqual(self.app.current_page, 0)
-        self.assertEqual((self.app.root.winfo_x(), self.app.root.winfo_y()), expected_position)
+        for mode in ("watch", "summary"):
+            button = self.app.widget_nav[mode]
+            x, y = button.winfo_rootx()+14, button.winfo_rooty()+10
+            button.event_generate("<ButtonPress-1>", x=14, y=10, rootx=x, rooty=y)
+            button.event_generate("<B1-Motion>", x=16, y=10, rootx=x+2, rooty=y)
+            button.event_generate("<ButtonRelease-1>", x=16, y=10, rootx=x+2, rooty=y)
+            button.invoke()
+            self.app.root.update()
+            self.assertEqual(self.app.current_page, 0)
+            self.assertEqual(self.app._overview_mode, mode)
+            self.assertEqual(bool(self.app.portfolio_frame.winfo_manager()), mode == "summary")
+            self.assertEqual((self.app.root.winfo_x(), self.app.root.winfo_y()), expected_position)
+            self.assertIsNone(self.app._window_move_origin)
 
     def test_portfolio_opens_in_front_with_either_widget_topmost_setting(self):
         self._require_tk()

@@ -5,3 +5,4 @@ __pycache__/
 .pyc
 market_history.db
 /temp/
+/ledger-backups/

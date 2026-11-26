@@ -78,7 +78,7 @@ class TestDynamicMarketPersistence(unittest.TestCase):
         self.assertEqual(loaded["prices"]["dolar"], 36.5)
         self.assertEqual(loaded["timestamp"], "Test Time")
 
-    def test_closed_market_uses_cached_thyao_data(self):
+    def test_offline_market_uses_cached_thyao_data(self):
         self.widget.save_last_data({
             "prices": {
                 "gumus_ons": 30.0,
@@ -89,16 +89,15 @@ class TestDynamicMarketPersistence(unittest.TestCase):
             },
             "timestamp": "Closed Time",
         })
-        self.widget.is_market_closed = MagicMock(return_value=True)
-
-        self.widget.veri_getir()
+        with patch.object(self.widget, "_fetch_raw_prices", return_value={}), patch.object(self.widget, "_fetch_spot_silver_price", return_value=0):
+            self.widget.veri_getir()
 
         self.widget.price_vars["thyao"].set.assert_called_with("₺300,00")
-        self.widget.var_market_label.set.assert_called_with("Piyasa Kapalı")
-        self.widget.var_time.set.assert_called_with("Son: Closed Time")
+        self.widget.var_market_label.set.assert_called_with("Son kayıtlar")
+        self.widget.var_time.set.assert_called_with("Closed Time")
+        self.assertEqual(self.widget.workspace_quote_status("thyao", compact=True), "Son kayıt")
 
     def test_open_market_fetch_saves_thyao_and_dynamic_history(self):
-        self.widget.is_market_closed = MagicMock(return_value=False)
         prices = {
             "GC=F": 2500.0,
             "TRY=X": 40.0,
@@ -118,8 +117,30 @@ class TestDynamicMarketPersistence(unittest.TestCase):
         self.assertEqual(loaded["sources"]["gumus_ons"], main.SILVER_SPOT_SYMBOL)
         self.widget.price_vars["thyao"].set.assert_called_with("₺300,00")
 
-        inserted_prices = self.widget.history_db.insert_prices.call_args.args[0]
+        inserted_prices = {key: value for call in self.widget.history_db.insert_prices.call_args_list
+                           for key, value in call.args[0].items()}
         self.assertEqual(inserted_prices["thyao"], 300.0)
+
+    def test_partial_refresh_keeps_old_timestamp_and_marks_old_fx(self):
+        old = "2026-11-24T09:00:00+00:00"
+        self.widget.save_last_data(main.market_data_for_save(
+            {"thyao": 300, "dolar": 40}, sources={"thyao": "THYAO.IS", "dolar": "TRY=X"},
+            quotes={"thyao": {"observed_at": old, "price_at": old, "provider": "Yahoo Finance", "state": "received"}},
+        ))
+        with (
+            patch.object(self.widget, "_fetch_raw_prices", return_value={}),
+            patch.object(self.widget, "_fetch_spot_silver_price", return_value=32.0),
+        ):
+            self.widget.veri_getir()
+
+        saved = self.widget.load_last_data()
+        self.assertEqual(saved["quotes"]["thyao"]["price_at"], old)
+        self.assertEqual(saved["quotes"]["thyao"]["state"], "cached")
+        self.assertEqual(saved["quotes"]["gumus_tl"]["state"], "mixed")
+        self.assertIn("24.11 12:00", self.widget.workspace_quote_status("thyao"))
+        self.assertIn("Eski kur", self.widget.workspace_quote_status("gumus_tl"))
+        inserted = {key for call in self.widget.history_db.insert_prices.call_args_list for key in call.args[0]}
+        self.assertEqual(inserted, {"gumus_ons"})
 
     def test_usd_priced_watchlist_items_require_dollar_rate(self):
         widget = main.PiyasaWidget.__new__(main.PiyasaWidget)
@@ -762,6 +783,28 @@ class TestMultiAssetPortfolio(unittest.TestCase):
 
 
 class TestWatchlistManager(unittest.TestCase):
+    def test_hidden_usd_position_stays_valued_and_can_be_restored_after_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "watchlist.json")
+            manager = main.WatchlistManager(path)
+            apple = manager.add("Apple", "AAPL", "$")
+            portfolio = main.TransactionManager(os.path.join(tmp, "transactions.json"))
+            portfolio.save({"instrument_key": apple["key"], "quantity": 1, "total_tl": 4000})
+            manager.remove(apple["key"])
+
+            widget = main.PiyasaWidget.__new__(main.PiyasaWidget)
+            widget.watchlist_manager = main.WatchlistManager(path)
+            widget.watchlist = widget.watchlist_manager.instruments
+            widget.tm = portfolio
+            self.assertFalse(widget.watchlist_manager.has_symbol("AAPL"))
+            self.assertIn("AAPL", widget._required_yahoo_symbols())
+            instruments = widget.workspace_instruments()
+            summary = portfolio.get_portfolio_summary({apple["key"]: 120, "dolar": 40}, instruments)
+            self.assertEqual(summary["total_value_tl"], 4800)
+
+            widget.watchlist_manager.restore(apple["key"])
+            self.assertIn(apple, main.WatchlistManager(path).instruments)
+
     def test_defaults_include_thyao_and_user_symbols_are_persistent(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "watchlist.json")

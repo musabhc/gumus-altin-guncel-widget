@@ -41,7 +41,7 @@ Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescrip
 
 [Files]
 ; Mutable app data stays in its existing location during upgrades.
-Source: "{#BuildDir}\*"; Excludes: "transactions.json,watchlist.json,preferences.json,market_data.json,market_history.db,market_history.db-*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#BuildDir}\*"; Excludes: "transactions.json,watchlist.json,preferences.json,market_data.json,market_history.db,market_history.db-*,ledger-backups\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

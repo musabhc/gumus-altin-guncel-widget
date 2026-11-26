@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import logging
 import math
 import tkinter as tk
+from tkinter import ttk
 
 from PIL import Image, ImageDraw, ImageTk
 
@@ -15,9 +16,11 @@ from ui_components import IconButton, SegmentedControl
 
 
 DAY = 24 * 60 * 60
-PERIODS = (("1G", DAY), ("1H", 7 * DAY), ("1A", 30 * DAY),
-           ("3A", 90 * DAY), ("1Y", 365 * DAY), ("Tümü", 0))
-INTERVAL_LABELS = {"5m": "5 dk", "1d": "Günlük", "live": "Canlı ölçüm"}
+PERIODS = (("30 dk", 1800), ("1 sa", 3600), ("6 sa", 21600), ("12 sa", 43200),
+           ("24 sa", DAY), ("7 gün", 7 * DAY), ("30 gün", 30 * DAY),
+           ("90 gün", 90 * DAY), ("1 yıl", 365 * DAY), ("Tümü", 0))
+PERIOD_LABELS = {value: label for label, value in PERIODS}
+INTERVAL_LABELS = {"5m": "5 dk", "1d": "Günlük", "live": "Kaydedilmiş fiyat"}
 TR_DIGITS = str.maketrans(",.", ".,")
 
 
@@ -65,13 +68,15 @@ class WorkspaceChart(tk.Frame):
     """Price chart whose history provider returns rows, source and interval."""
 
     def __init__(self, parent, load_history, *, parse_timestamp=_parse_time,
-                 downsample=_keep_plot_extremes, format_price=_format_price):
+                 downsample=_keep_plot_extremes, format_price=_format_price,
+                 compact=False, initial_period=30 * DAY, on_period_changed=None):
         super().__init__(parent, bg=THEME["surface"], highlightthickness=1,
                          highlightbackground=THEME["border"])
         self._load_history = load_history
         self._parse_timestamp = parse_timestamp
         self._downsample = downsample
         self._format_price = format_price
+        self._compact = compact
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="workspace-history")
         self._loading = None
         self._load_job = None
@@ -80,6 +85,8 @@ class WorkspaceChart(tk.Frame):
         self._destroyed = False
         self.instrument = None
         self._quote = None
+        self._quote_status = ""
+        self._on_period_changed = on_period_changed
         self._series = ()
         self._times = ()
         self._view = (0.0, 1.0)
@@ -90,24 +97,24 @@ class WorkspaceChart(tk.Frame):
         self._hover_index = None
         self._message = "Bir varlık seç"
         self._history_meta = ""
-        self.period = tk.IntVar(master=self, value=30 * DAY)
+        self.period = tk.IntVar(master=self, value=initial_period)
 
         top = tk.Frame(self, bg=THEME["surface"])
-        top.pack(fill="x", padx=18, pady=(14, 6))
         self.heading = self._label(top, "Fiyat grafiği", "section", weight="bold")
-        self.heading.pack(side="left")
-        self.source = self._label(top, "", "small", "text_secondary", anchor="e")
-        self.source.pack(side="right", padx=(8, 0))
+        if not compact:
+            top.pack(fill="x", padx=18, pady=(14, 6))
+            self.heading.pack(fill="x")
         value_row = tk.Frame(self, bg=THEME["surface"])
-        value_row.pack(fill="x", padx=18)
-        self.quote = self._label(value_row, "—", "value", weight="bold")
+        value_row.pack(fill="x", padx=12 if compact else 18, pady=(4, 0) if compact else 0)
+        self.quote = self._label(value_row, "—", "section" if compact else "value", weight="bold")
         self.quote.pack(side="left")
         self.change = self._label(value_row, "", "body", "text_secondary")
-        self.change.pack(side="left", padx=(10, 0), pady=(5, 0))
+        self.change.pack(side="right")
+        self.quote_meta = self._label(self, "", "small", "text_secondary")
+        self.quote_meta.pack(fill="x", padx=12 if compact else 18)
 
-        self.canvas = tk.Canvas(self, height=200, bd=0, highlightthickness=0,
+        self.canvas = tk.Canvas(self, height=108 if compact else 200, bd=0, highlightthickness=0,
                                 bg=THEME["surface"], takefocus=True)
-        self.canvas.pack(fill="both", expand=True, padx=12, pady=(3, 0))
         self.canvas.bind("<Configure>", self._queue_draw)
         self.canvas.bind("<Map>", self._queue_draw)
         self.canvas.bind("<Motion>", self._motion)
@@ -123,38 +130,74 @@ class WorkspaceChart(tk.Frame):
         self.canvas.bind("<minus>", lambda event: self._zoom(False))
 
         controls = tk.Frame(self, bg=THEME["surface"])
-        controls.pack(fill="x", padx=14, pady=(2, 7))
-        self.period_control = SegmentedControl(
-            controls, self.period, PERIODS, command=self._period_changed,
-        )
-        self.period_control.pack(side="left")
+        controls.pack(side="bottom", fill="x", padx=12 if compact else 14, pady=(0, 3) if compact else (2, 6))
+        self.source = self._label(self, "", "small", "text_secondary")
+        self.source.pack(side="bottom", fill="x", padx=12 if compact else 18)
+        self.period_control = None
+        self.period_choice = None
+        if compact:
+            self.period_choice = ttk.Combobox(
+                controls, state="readonly", style="Modern.TCombobox",
+                width=9, values=tuple(label for label, _ in PERIODS),
+            )
+            self.period_choice.set(PERIOD_LABELS[initial_period])
+            self.period_choice.bind("<<ComboboxSelected>>", self._select_compact_period)
+            self.period_choice.pack(side="left")
+        else:
+            self.period_control = SegmentedControl(
+                controls, self.period, PERIODS, command=self._select_period, columns=5,
+            )
+            self.period_control.pack(side="left")
         self.zoom_buttons = {}
-        for name, callback in (("reset", self.reset_view), ("plus", lambda: self._zoom(True)),
-                               ("minus", lambda: self._zoom(False))):
-            button = IconButton(controls, name, callback, size=30, bg=THEME["surface"])
-            button.pack(side="right", padx=(4, 0))
-            self.zoom_buttons[name] = button
+        if not compact:
+            for name, callback in (("reset", self.reset_view), ("plus", lambda: self._zoom(True)),
+                                   ("minus", lambda: self._zoom(False))):
+                button = IconButton(controls, name, callback, size=30, bg=THEME["surface"])
+                button.pack(side="right", padx=(4, 0))
+                self.zoom_buttons[name] = button
 
         self.range_stats = self._label(self, "", "small", "text_secondary")
-        self.range_stats.pack(fill="x", padx=18, pady=(0, 10))
+        if not compact:
+            self.range_stats.pack(side="bottom", fill="x", padx=18, pady=(0, 7))
+        self.canvas.pack(fill="both", expand=True, padx=12, pady=(3, 0))
         self._update_labels()
 
     def _label(self, parent, text, role, color="text_primary", weight="normal", anchor="w"):
         return tk.Label(parent, text=text, bg=THEME["surface"], fg=THEME[color],
                         font=font(self, role, weight), anchor=anchor)
 
-    def set_instrument(self, instrument, *, price=None):
+    def set_instrument(self, instrument, *, price=None, quote_status=""):
         old = self.instrument
         self.instrument = dict(instrument) if instrument else None
-        self.set_quote(price)
+        self.set_quote(price, quote_status)
         self.heading.configure(text=(self.instrument or {}).get("label", "Fiyat grafiği"))
         if self.instrument != old:
             self._reset_series("Grafik yükleniyor…" if self.instrument else "Bir varlık seç")
             self.refresh()
 
-    def set_quote(self, price):
+    def set_quote(self, price, status=""):
         self._quote = _positive_price(price)
+        self._quote_status = status
         self._update_labels()
+
+    def set_period(self, period):
+        if period not in PERIOD_LABELS or self.period.get() == period:
+            return
+        self.period.set(period)
+        if self.period_choice is not None:
+            self.period_choice.set(PERIOD_LABELS[period])
+        self._period_changed()
+
+    def _select_period(self):
+        self._period_changed()
+        if self._on_period_changed is not None:
+            self._on_period_changed(self.period.get())
+
+    def _select_compact_period(self, _event):
+        period = dict(PERIODS)[self.period_choice.get()]
+        self.set_period(period)
+        if self._on_period_changed is not None:
+            self._on_period_changed(period)
 
     def _period_changed(self):
         self._reset_series("Grafik yükleniyor…" if self.instrument else "Bir varlık seç")
@@ -236,10 +279,12 @@ class WorkspaceChart(tk.Frame):
         if series:
             if source == "SI=F" and self.instrument.get("source") in {"silver_spot", "silver_spot_try"}:
                 parts.append("Vadeli gümüş (SI=F)")
+            elif source:
+                parts.append(source)
             if interval in INTERVAL_LABELS:
                 parts.append(INTERVAL_LABELS[interval])
             parts.append(series[-1][0].strftime("%d/%m %H:%M"))
-        self._history_meta = " · ".join(parts)
+        self._history_meta = "Grafik · " + " · ".join(parts) if parts else ""
         self.source.configure(text=self._history_meta)
 
     def _visible_series(self):
@@ -259,6 +304,13 @@ class WorkspaceChart(tk.Frame):
         if price is None and self._series:
             price = self._series[-1][1]
         self.quote.configure(text=self._format_price(self.instrument, price) if price is not None and self.instrument else "—")
+        if self._quote is not None:
+            quote_meta = f"Son fiyat · {self._quote_status}" if self._quote_status else "Son fiyat"
+        elif self._series:
+            quote_meta = f"Grafikten · {self._series[-1][0]:%d/%m %H:%M}"
+        else:
+            quote_meta = "Fiyat yok" if self.instrument else ""
+        self.quote_meta.configure(text=quote_meta)
         self.source.configure(text=self._history_meta)
         if rows is None:
             return
@@ -268,7 +320,7 @@ class WorkspaceChart(tk.Frame):
             return
         delta = (rows[-1][1] / rows[0][1] - 1) * 100
         color = THEME["positive"] if delta >= 0 else THEME["negative"]
-        self.change.configure(text=f"{delta:+.2f}%".replace(".", ","), fg=color)
+        self.change.configure(text=f"Dönem {delta:+.2f}%".replace(".", ","), fg=color)
         minimum = self._format_price(self.instrument, min(row[1] for row in rows))
         maximum = self._format_price(self.instrument, max(row[1] for row in rows))
         self.range_stats.configure(text=f"En düşük  {minimum}    ·    En yüksek  {maximum}")
@@ -291,7 +343,7 @@ class WorkspaceChart(tk.Frame):
     def _draw(self, *, preview=False):
         canvas = self.canvas
         width, height = canvas.winfo_width(), canvas.winfo_height()
-        if not canvas.winfo_ismapped() or width < 100 or height < 55:
+        if not canvas.winfo_ismapped() or width < 100 or height < (28 if self._compact else 55):
             return
         frame = width, height, self._view, preview
         if self._frame and self._frame[:3] == frame[:3] and (preview or not self._frame[3]):
@@ -305,7 +357,8 @@ class WorkspaceChart(tk.Frame):
         if not rows:
             self._image = None
             canvas.create_text(width / 2, height / 2, text=self._message,
-                               font=font(self, "body"), fill=THEME["text_secondary"])
+                               font=font(self, "small" if self._compact else "body"), width=width - 12,
+                               fill=THEME["text_secondary"])
             return
 
         # Compose an opaque image before uploading to Tk. Canvas keeps all text
@@ -315,8 +368,9 @@ class WorkspaceChart(tk.Frame):
         decimals = int(self.instrument.get("decimals", 2))
         margin = max((high - low) * .12, high * .0005, 2 * 10 ** -decimals)
         low, high = low - margin, high + margin
-        top, bottom = 12, height - 25
-        left, right = 10, width - min(86, width // 3)
+        brief = self._compact and height < 82
+        top, bottom = (5, height - 6) if brief else (12, height - 25)
+        left, right = 10, width - (10 if brief else min(86, width // 3))
         first, last = rows[0][0], rows[-1][0]
         span = last - first
         color = THEME["positive"] if rows[-1][1] >= rows[0][1] else THEME["negative"]
@@ -341,20 +395,21 @@ class WorkspaceChart(tk.Frame):
         background.paste(line, (0, 0), line.getchannel("A"))
         self._image = ImageTk.PhotoImage(background, master=canvas)
         canvas.create_image(0, 0, image=self._image, anchor="nw")
-        tick_font = font(self, "small")
-        for index, y in enumerate(tick_rows):
-            tick_value = high - (high - low) * index / 4
-            label = f"{tick_value:,.{decimals}f}".translate(TR_DIGITS)
-            canvas.create_text(right + 8, y, anchor="w", text=label,
-                               fill=THEME["text_muted"], font=tick_font)
-        time_format = "%H:%M" if span <= timedelta(days=2) else "%d/%m" if span <= timedelta(days=90) else "%m/%Y"
-        num_labels = min(5, len(rows), max(2, (right - left) // 75))
-        for index in range(num_labels):
-            fraction = index / (num_labels - 1) if num_labels > 1 else 0.5
-            anchor = "w" if index == 0 else "e" if index == num_labels - 1 else "center"
-            canvas.create_text(left + (right - left) * fraction, height - 10,
-                               text=(first + span * fraction).strftime(time_format),
-                               anchor=anchor, fill=THEME["text_muted"], font=tick_font)
+        if not brief:
+            tick_font = font(self, "small")
+            for index, y in enumerate(tick_rows):
+                tick_value = high - (high - low) * index / 4
+                label = f"{tick_value:,.{decimals}f}".translate(TR_DIGITS)
+                canvas.create_text(right + 8, y, anchor="w", text=label,
+                                   fill=THEME["text_muted"], font=tick_font)
+            time_format = "%H:%M" if span <= timedelta(days=2) else "%d/%m" if span <= timedelta(days=90) else "%m/%Y"
+            num_labels = min(5, len(rows), max(2, (right - left) // 75))
+            for index in range(num_labels):
+                fraction = index / (num_labels - 1) if num_labels > 1 else 0.5
+                anchor = "w" if index == 0 else "e" if index == num_labels - 1 else "center"
+                canvas.create_text(left + (right - left) * fraction, height - 10,
+                                   text=(first + span * fraction).strftime(time_format),
+                                   anchor=anchor, fill=THEME["text_muted"], font=tick_font)
         self._plot = (rows, tuple(row[0] for row in rows), coordinates, left, top, right, bottom, color)
         canvas.configure(cursor="hand2" if self._view != (0.0, 1.0) else "crosshair")
 

@@ -45,11 +45,16 @@ class TestWorkspaceChart(unittest.TestCase):
             return rows, "TEST.IS", "1d"
 
         chart = self.chart(load)
-        chart.set_instrument({"key": "test", "label": "Test", "currency": "₺"}, price=301.25)
+        chart.set_instrument(
+            {"key": "test", "label": "Test", "currency": "₺"},
+            price=301.25, quote_status="Son kayıt · 17:25",
+        )
         self.wait_for(lambda: chart._plot is not None)
         self.assertEqual(chart.quote.cget("text"), "₺301,25")
         self.assertEqual(calls, [("test", 30 * DAY)])
         self.assertIn("Günlük", chart.source.cget("text"))
+        self.assertIn("TEST.IS", chart.source.cget("text"))
+        self.assertEqual(chart.quote_meta.cget("text"), "Son fiyat · Son kayıt · 17:25")
 
         chart.period_control.select(90 * DAY)
         self.wait_for(lambda: len(chart._series) == 91 and chart._plot is not None)
