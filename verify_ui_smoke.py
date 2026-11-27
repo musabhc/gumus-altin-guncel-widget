@@ -438,7 +438,7 @@ class IsolatedTkSmokeTest(unittest.TestCase):
             centers = [widget.winfo_rooty() + widget.winfo_height() / 2 for widget in widgets]
             self.assertLessEqual(max(centers) - min(centers), 1)
         self.assertEqual(set(self.app.footer_buttons), {"settings", "refresh"})
-        self.assertEqual([button.cget("text") for button in self.app.widget_nav.values()], ["Özet", "İzleme"])
+        self.assertEqual([button.cget("text") for button in self.app.widget_nav.values()], ["Özet", "İzleme", "Portföy"])
         for button in self.app.footer_buttons.values():
             self.assertIsNone(button.label)
             self.assertEqual(int(button.cget("width")), 32)
@@ -448,6 +448,31 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         self.app.root.update()
         self.assertTrue(self.app.settings_menu.winfo_viewable())
         self.assertTrue(self.app.settings_menu.attributes("-topmost"))
+
+    def test_widget_portfolio_tab_shows_open_positions_and_restores_watchlist(self):
+        self._require_tk()
+        self._build_piyasa_widget()
+        app = self.app
+        app.tm.save({
+            "date": "01-01-2026", "instrument_key": "thyao", "action": "buy",
+            "quantity": 2, "currency": "TL", "total_tl": 400,
+        })
+        app._last_prices["thyao"] = 250
+        app._update_portfolio_view()
+
+        app.widget_nav["portfolio"].invoke()
+        self.assertTrue(app.portfolio_breakdown_frame.winfo_manager())
+        self.assertFalse(app.price_rows_frame.winfo_manager())
+        position = app.portfolio_breakdown_frame.winfo_children()[0]
+        labels = [child.cget("text") for child in position.winfo_children() if isinstance(child, tk.Label)]
+        self.assertEqual(labels, ["THYAO", "2 adet", "Ort. ₺200,00", "₺500,00", "+₺100,00"])
+
+        app.widget_nav["watch"].invoke()
+        self.assertFalse(app.portfolio_frame.winfo_manager())
+        self.assertTrue(app.price_rows_frame.winfo_manager())
+        app.widget_nav["summary"].invoke()
+        self.assertTrue(app.portfolio_frame.winfo_manager())
+        self.assertFalse(app.portfolio_breakdown_frame.winfo_manager())
 
     def test_compact_actions_and_scrollable_overview(self):
         self._require_tk()

@@ -24,7 +24,7 @@ from tkinter import messagebox, filedialog
 from queue import Empty, SimpleQueue
 from PIL import Image, ImageDraw, ImageTk
 
-from desktop_workspace import DesktopWorkspace
+from desktop_workspace import DesktopWorkspace, quantity_text
 from ledger_storage import decode_records, encode_records, ledger_write_lock, read_snapshot, replace_snapshot
 from trade_calendar import TradeCalendar
 from market_quotes import (
@@ -2842,10 +2842,14 @@ class PiyasaWidget:
             self.root.attributes("-topmost", True)
         
         self.root.configure(bg=self.bg_color)
+        icon_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else APP_DIR
+        self.brand_logo_path = os.path.join(icon_dir, "icon.ico")
+        self._brand_logo = None
         try:
-            icon_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else APP_DIR
-            self.root.iconbitmap(default=os.path.join(icon_dir, "icon.ico"))
-        except tk.TclError:
+            with Image.open(self.brand_logo_path) as logo:
+                self._brand_logo = ImageTk.PhotoImage(logo.ico.getimage((24, 24)), master=self.root)
+            self.root.iconbitmap(default=self.brand_logo_path)
+        except (OSError, tk.TclError):
             pass
         
         # Taskbar'dan gizleme (Windows Widget Modu)
@@ -3086,6 +3090,8 @@ class PiyasaWidget:
 
         brand_frame = tk.Frame(header_frame, bg=self.bg_color)
         brand_frame.pack(fill="x", pady=(0, SPACING["xxs"]))
+        if self._brand_logo is not None:
+            tk.Label(brand_frame, image=self._brand_logo, bg=self.bg_color, bd=0).pack(side="left", padx=(0, 4))
         tk.Label(
             brand_frame, text="Piyasa", bg=self.bg_color, fg=self.color_text_main,
             font=font(self.root, "section", "bold"), anchor="w",
@@ -3135,10 +3141,10 @@ class PiyasaWidget:
         self.lbl_time.pack(side="left", fill="y", padx=4)
         status_frame.pack_configure(fill="both")
 
-        navigation = tk.Frame(brand_frame, bg=self.bg_color)
-        navigation.pack(side="left", padx=(8, 0))
+        navigation = tk.Frame(header_frame, bg=self.bg_color)
+        navigation.pack(fill="x", pady=(SPACING["xxs"], 0))
         self.widget_nav = {}
-        for mode, label in (("summary", "Özet"), ("watch", "İzleme")):
+        for mode, label in (("summary", "Özet"), ("watch", "İzleme"), ("portfolio", "Portföy")):
             button = HoverButton(
                 navigation, text=label, command=lambda target=mode: self._show_widget_overview(target),
                 bg=self.color_card_alt, fg=self.color_text_main, hover_bg=THEME["surface_hover"],
@@ -3147,6 +3153,7 @@ class PiyasaWidget:
             button.pack(side="left", padx=(0, 4))
             self.widget_nav[mode] = button
         self._overview_mode = "summary"
+        self._summary_breakdown_open = False
 
         # 4. FOOTER (kompakt araç çubuğu) - footer önce pack edilir (side=bottom)
         footer_frame = tk.Frame(
@@ -3308,14 +3315,15 @@ class PiyasaWidget:
         """Combine an antialiased ring with native, DPI-aware font rendering."""
         canvas.delete("all")
         color = instrument.get("color", self.color_accent)
-        canvas._asset_image = ImageTk.PhotoImage(render_asset_ring(24, color, THEME["surface_hover"]), master=canvas)
+        canvas._asset_image = ImageTk.PhotoImage(render_asset_ring(24, color, None), master=canvas)
         canvas.create_image(0, 0, anchor="nw", image=canvas._asset_image)
         label = str(instrument.get("label") or instrument.get("key") or "?")
         mark = {"gumus_ons": "Ag", "gumus_tl": "Ag", "altin_tl": "Au", "dolar": "$", "thyao": "TH"}
-        canvas.create_text(
-            12, 12, text=mark.get(instrument.get("key"), label[:2].upper()),
-            fill=color, font=font(canvas, "caption", "bold"),
-        )
+        text = mark.get(instrument.get("key"), label[:2].upper())
+        canvas._asset_font = tkfont.Font(root=canvas, family=self.font_small.actual("family"), size=-10, weight="bold")
+        while canvas._asset_font.measure(text) > 15 and canvas._asset_font.cget("size") < -6:
+            canvas._asset_font.configure(size=canvas._asset_font.cget("size") + 1)
+        canvas.create_text(12, 12, text=text, fill=color, font=canvas._asset_font)
 
     def _set_price_row_hover(self, row, surface_widgets, key, entered):
         """Apply an event-only row hover without masking drag feedback."""
@@ -3564,20 +3572,33 @@ class PiyasaWidget:
                 label.configure(text=status(key, compact=True))
 
     def _toggle_widget_breakdown(self):
-        if self.portfolio_breakdown_frame.winfo_manager():
-            self.portfolio_breakdown_frame.pack_forget()
-            self.btn_portfolio_breakdown.config(text="Pozisyonlar")
+        self._summary_breakdown_open = not self._summary_breakdown_open
+        self._sync_widget_breakdown()
+
+    def _sync_widget_breakdown(self):
+        if self._overview_mode == "portfolio":
+            self.btn_portfolio_breakdown.pack_forget()
         else:
+            self.btn_portfolio_breakdown.pack(side="right")
+        if self._overview_mode == "portfolio" or self._summary_breakdown_open:
             self.portfolio_breakdown_frame.pack(fill="x", pady=(SPACING["xs"], 0))
             self.btn_portfolio_breakdown.config(text="Pozisyonları gizle")
+        else:
+            self.portfolio_breakdown_frame.pack_forget()
+            self.btn_portfolio_breakdown.config(text="Pozisyonlar")
 
     def _show_widget_overview(self, mode):
         self._cancel_price_row_drag(restore=True)
         self._overview_mode = mode
-        if mode == "summary":
-            self.portfolio_frame.pack(fill="x", before=self.watch_header, pady=(0, SPACING["xs"]))
-        else:
-            self.portfolio_frame.pack_forget()
+        self.portfolio_frame.pack_forget()
+        self.watch_header.pack_forget()
+        self.price_rows_frame.pack_forget()
+        if mode != "watch":
+            self.portfolio_frame.pack(fill="x", pady=(0, SPACING["xs"]))
+        if mode != "portfolio":
+            self.watch_header.pack(fill="x", pady=(0, SPACING["xxs"]))
+            self.price_rows_frame.pack(fill="x")
+        self._sync_widget_breakdown()
         self._layout_price_rows([instrument["key"] for instrument in self.watchlist])
         self.show_page(0)
         self.overview_canvas.yview_moveto(0)
@@ -3750,7 +3771,6 @@ class PiyasaWidget:
                 pady=4,
             )
             row.pack(fill="x", pady=SPACING["xxs"] // 2)
-            row.grid_columnconfigure(2, weight=1)
 
             marker = tk.Canvas(
                 row,
@@ -3766,12 +3786,20 @@ class PiyasaWidget:
             ), master=marker)
             marker.create_image(0, 0, anchor="nw", image=marker._marker_image)
 
-            qty = f"{row_data['quantity']:,.2f}".rstrip("0").rstrip(".")
-            left = f"{row_data['label']}: {qty} {row_data['unit']}"
-            tk.Label(row, text=left, bg=self.color_card_alt, fg=self.color_text_dim, font=self.font_small, anchor="w").grid(row=0, column=1, sticky="w")
+            row.grid_columnconfigure(1, weight=1)
+            tk.Label(row, text=row_data["label"], width=1, bg=self.color_card_alt, fg=self.color_text_main,
+                     font=self.font_label, anchor="w").grid(row=0, column=1, sticky="ew")
+            quantity = f"{quantity_text(row_data['quantity'])} {row_data['unit']}"
+            average = self._format_tl(row_data["average_cost_tl"], 2)
+            tk.Label(row, text=quantity, bg=self.color_card_alt,
+                     fg=self.color_text_dim, font=self.font_small, anchor="w").grid(
+                         row=1, column=1, sticky="ew")
+            tk.Label(row, text=f"Ort. {average}", bg=self.color_card_alt,
+                     fg=self.color_text_dim, font=self.font_small, anchor="w").grid(
+                         row=2, column=1, columnspan=2, sticky="ew")
 
             if row_data["has_price"]:
-                value_text = self._format_tl(row_data["value_tl"], 0)
+                value_text = self._format_tl(row_data["value_tl"], 2)
             else:
                 value_text = "Fiyat yok"
             tk.Label(row, text=value_text, bg=self.color_card_alt, fg=self.color_text_main, font=self.font_small, anchor="e").grid(row=0, column=2, sticky="e", padx=(SPACING["xs"], SPACING["xs"]))
@@ -3781,10 +3809,10 @@ class PiyasaWidget:
                 profit_text = "--"
                 profit_color = self.color_text_muted
             else:
-                sign = "+" if profit >= 0 else ""
-                profit_text = f"{sign}{self._format_tl(abs(profit), 0)}" if profit >= 0 else f"-{self._format_tl(abs(profit), 0)}"
+                sign = "+" if profit > 0 else "−" if profit < 0 else ""
+                profit_text = f"{sign}{self._format_tl(abs(profit), 2)}"
                 profit_color = self.color_success if profit >= 0 else self.color_danger
-            tk.Label(row, text=profit_text, bg=self.color_card_alt, fg=profit_color, font=self.font_badge, anchor="e").grid(row=0, column=3, sticky="e")
+            tk.Label(row, text=profit_text, bg=self.color_card_alt, fg=profit_color, font=self.font_badge, anchor="e").grid(row=1, column=2, sticky="e", padx=SPACING["xs"])
 
     # --- Sayfa Navigasyon Sistemi ---
     def show_page(self, index):

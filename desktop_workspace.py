@@ -8,9 +8,7 @@ from ctypes import wintypes
 from datetime import datetime
 from tkinter import ttk
 
-from PIL import ImageTk
-
-from rendering import render_icon
+from PIL import Image, ImageTk
 from theme import THEME, font, turkish_number
 from ui_components import HoverButton, ModernEntry, SearchEntry, TransactionTable
 from workspace_chart import DAY, PERIOD_LABELS, WorkspaceChart
@@ -76,9 +74,14 @@ class DesktopWorkspace(tk.Toplevel):
 
         brand = tk.Frame(rail, bg=THEME["surface"])
         brand.grid(row=0, column=0, sticky="ew", padx=15, pady=(24, 24))
-        self.brand_icon = ImageTk.PhotoImage(render_icon("chart", 25, THEME["primary_ink"]), master=brand)
-        mark = tk.Label(brand, image=self.brand_icon, bg=THEME["primary"], bd=0, highlightthickness=0)
-        mark.pack(side="left", ipadx=4, ipady=4)
+        logo_path = getattr(self.app, "brand_logo_path", None)
+        if logo_path:
+            try:
+                with Image.open(logo_path) as logo:
+                    self.brand_icon = ImageTk.PhotoImage(logo.ico.getimage((32, 32)), master=brand)
+                tk.Label(brand, image=self.brand_icon, bg=THEME["surface"], bd=0).pack(side="left")
+            except OSError:
+                pass
         self._label(brand, "Piyasa", bg=THEME["surface"], role="section", weight="bold").pack(side="left", padx=(9, 0))
         self.navigation = {}
         for index, (view, label) in enumerate(self.SCREENS.items(), 1):
