@@ -6,7 +6,7 @@ import time
 import tkinter as tk
 import unittest
 
-from workspace_chart import DAY, WorkspaceChart
+from piyasa.ui.workspace_chart import DAY, WorkspaceChart
 
 
 class TestWorkspaceChart(unittest.TestCase):

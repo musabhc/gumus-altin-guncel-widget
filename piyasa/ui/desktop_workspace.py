@@ -9,9 +9,9 @@ from datetime import datetime
 from tkinter import ttk
 
 from PIL import Image, ImageTk
-from theme import THEME, font, turkish_number
-from ui_components import HoverButton, ModernEntry, SearchEntry, TransactionTable
-from workspace_chart import DAY, PERIOD_LABELS, WorkspaceChart
+from piyasa.ui.theme import THEME, font, turkish_number
+from piyasa.ui.components import HoverButton, ModernEntry, SearchEntry, TransactionTable
+from piyasa.ui.workspace_chart import DAY, PERIOD_LABELS, WorkspaceChart
 
 
 def money(value, decimals=2):

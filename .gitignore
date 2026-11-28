@@ -1,8 +1,21 @@
+# Python and local environments
+__pycache__/
+*.py[cod]
+/.venv/
+
+# Runtime data
 /transactions.json
 /watchlist.json
 /preferences.json
-__pycache__/
-.pyc
-market_history.db
-/temp/
+/market_data.json
+/market_history.db*
 /ledger-backups/
+
+# Build outputs
+/_version.py
+/build/
+/dist/
+/Output/
+/*.spec
+/cert.pfx
+/temp/

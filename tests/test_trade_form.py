@@ -7,7 +7,9 @@ import tkinter as tk
 import unittest
 from unittest.mock import patch
 
-from main import PortfolioManagerDialog, TransactionManager, default_watchlist
+from piyasa.market.instruments import default_watchlist
+from piyasa.portfolio.transactions import TransactionManager
+from piyasa.ui.portfolio_dialog import PortfolioManagerDialog
 
 
 class TestQuickTradeForm(unittest.TestCase):
@@ -84,7 +86,7 @@ class TestQuickTradeForm(unittest.TestCase):
         form.entry_total.insert(0, "10")
         self.wait_for_preview(lambda: bool(form.preview_error.get()))
         self.assertIn("mevcut miktar", form.preview_error.get())
-        with patch("main.messagebox.showerror") as error:
+        with patch("piyasa.ui.portfolio_dialog.messagebox.showerror") as error:
             form.save()
         self.assertTrue(form.winfo_exists())
         error.assert_called_once()

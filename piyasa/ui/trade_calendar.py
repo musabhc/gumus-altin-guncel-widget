@@ -4,7 +4,7 @@ from calendar import Calendar
 from datetime import date
 import tkinter as tk
 
-from theme import SPACING, THEME, font
+from piyasa.ui.theme import SPACING, THEME, font
 
 
 MONTH_NAMES = (

@@ -105,18 +105,21 @@ def render_asset_ring(size, color, background):
 
 
 def render_chart_line(
-    width, height, points, color, *, stroke=1.5, endpoint=0, fill_to=None, preview=False
+    width, height, points, color, *, stroke=1.5, endpoint=0, fill_to=None, preview=False, breaks=()
 ):
     # The curve and area share a color, so only their opacity needs supersampling.
     art = Artwork(width, height, mode="L", supersample=2 if preview else SUPERSAMPLE)
     red, green, blue, opacity = ImageColor.getcolor(color, "RGBA")
-    if fill_to is not None and len(points) > 1:
-        art.polygon(list(points) + [(points[-1][0], fill_to), (points[0][0], fill_to)], 28)
-    if len(points) > 1:
-        art.line(points, opacity, stroke)
-    if points and endpoint:
-        x, y = points[-1]
-        art.ellipse((x-endpoint, y-endpoint, x+endpoint, y+endpoint), fill=opacity)
+    starts = (0, *breaks)
+    for start, end in zip(starts, (*breaks, len(points))):
+        segment = points[start:end]
+        if len(segment) > 1:
+            if fill_to is not None:
+                art.polygon(list(segment) + [(segment[-1][0], fill_to), (segment[0][0], fill_to)], 28)
+            art.line(segment, opacity, stroke)
+        if segment and endpoint and (end == len(points) or len(segment) == 1):
+            x, y = segment[-1]
+            art.ellipse((x-endpoint, y-endpoint, x+endpoint, y+endpoint), fill=opacity)
     result = Image.new("RGBA", (art.width, art.height), (red, green, blue))
     resample = Image.Resampling.BOX if preview else Image.Resampling.LANCZOS
     result.putalpha(art.finish(resample))

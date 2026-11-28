@@ -4,7 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from main import TransactionManager
+from piyasa.portfolio.transactions import TransactionManager
 
 
 class TestLedgerSafety(unittest.TestCase):

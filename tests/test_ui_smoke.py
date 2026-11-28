@@ -1,6 +1,6 @@
 """Focused, isolated smoke checks for the Tk presentation layer.
 
-The tests deliberately redirect ``main.APP_DIR`` to a temporary directory
+The tests deliberately redirect ``paths.APP_DIR`` to a temporary directory
 before constructing application widgets.  They also disable the market-data
 loop, so running this module cannot read, migrate, or overwrite the user's
 live portfolio files.
@@ -15,10 +15,15 @@ import tempfile
 import tkinter as tk
 import unittest
 from datetime import datetime, timedelta
+from tkinter import messagebox
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import main
+from piyasa import paths
+from piyasa import widget as widget_module
+from piyasa.market import instruments, watchlist
+from piyasa.portfolio import transactions
+from piyasa.ui import components, portfolio_dialog, theme, watchlist_dialog
 
 
 def _disabled_data_loop(_widget):
@@ -30,14 +35,14 @@ class IsolatedTkSmokeTest(unittest.TestCase):
 
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.original_app_dir = main.APP_DIR
-        self.original_data_loop = main.PiyasaWidget.veri_dongusu
+        self.original_app_dir = paths.APP_DIR
+        self.original_data_loop = widget_module.PiyasaWidget.veri_dongusu
         self.app = None
         self.dialog = None
         self.root = None
 
-        main.APP_DIR = self.temp_dir.name
-        main.PiyasaWidget.veri_dongusu = _disabled_data_loop
+        paths.APP_DIR = self.temp_dir.name
+        widget_module.PiyasaWidget.veri_dongusu = _disabled_data_loop
 
         # Cleanups are LIFO: windows/database first, globals next, temporary
         # files last.  This order also applies when a test is skipped.
@@ -46,8 +51,8 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         self.addCleanup(self._cleanup_gui)
 
     def _restore_globals(self):
-        main.PiyasaWidget.veri_dongusu = self.original_data_loop
-        main.APP_DIR = self.original_app_dir
+        widget_module.PiyasaWidget.veri_dongusu = self.original_data_loop
+        paths.APP_DIR = self.original_app_dir
 
     @staticmethod
     def _destroy(widget):
@@ -91,7 +96,7 @@ class IsolatedTkSmokeTest(unittest.TestCase):
     def _require_tk(self):
         """Skip cleanly when Tcl/Tk cannot connect to the current desktop."""
 
-        main.enable_high_dpi()
+        theme.enable_high_dpi()
         probe = None
         try:
             probe = tk.Tk()
@@ -108,8 +113,8 @@ class IsolatedTkSmokeTest(unittest.TestCase):
 
     def _build_piyasa_widget(self):
         # Assign before __init__ so cleanup can recover a partially built root.
-        self.app = main.PiyasaWidget.__new__(main.PiyasaWidget)
-        main.PiyasaWidget.__init__(self.app)
+        self.app = widget_module.PiyasaWidget.__new__(widget_module.PiyasaWidget)
+        widget_module.PiyasaWidget.__init__(self.app)
         self.app.root.withdraw()
         self.app.root.update_idletasks()
         return self.app
@@ -229,7 +234,7 @@ class IsolatedTkSmokeTest(unittest.TestCase):
             [item["key"] for item in self.app.watchlist],
             final_order,
         )
-        reloaded = main.WatchlistManager(self.app.watchlist_manager.filepath)
+        reloaded = watchlist.WatchlistManager(self.app.watchlist_manager.filepath)
         self.assertEqual(
             [item["key"] for item in reloaded.instruments],
             final_order,
@@ -320,7 +325,7 @@ class IsolatedTkSmokeTest(unittest.TestCase):
             self.assertEqual(draw_chart.call_count, 3)
 
     def test_zoomed_chart_selects_nearby_samples_across_market_closure(self):
-        widget = main.PiyasaWidget.__new__(main.PiyasaWidget)
+        widget = widget_module.PiyasaWidget.__new__(widget_module.PiyasaWidget)
         first = datetime(2026, 11, 20, 18)
         widget._chart_rows = [
             (first + timedelta(hours=hours), value)
@@ -336,7 +341,7 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         self._require_tk()
         self._build_piyasa_widget()
 
-        self.assertIsInstance(self.app.settings_menu, main.ThemedPopupMenu)
+        self.assertIsInstance(self.app.settings_menu, components.ThemedPopupMenu)
         self.assertIsInstance(self.app.settings_menu, tk.Toplevel)
         self.assertEqual(
             [
@@ -363,11 +368,11 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         )
         self.assertEqual(
             self.app.settings_menu.cget("bg"),
-            main.THEME["border_strong"],
+            theme.THEME["border_strong"],
         )
         self.assertEqual(
             self.app.settings_menu.body.cget("bg"),
-            main.THEME["surface_alt"],
+            theme.THEME["surface_alt"],
         )
 
     def test_all_price_row_surfaces_capture_drag_events(self):
@@ -401,7 +406,7 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         target.event_generate("<ButtonRelease-1>", x=2, y=end_y-y, rootx=x, rooty=end_y)
         expected = original_order[1:] + [key]
         self.assertEqual([item["key"] for item in self.app.watchlist], expected)
-        reloaded = main.WatchlistManager(self.app.watchlist_manager.filepath)
+        reloaded = watchlist.WatchlistManager(self.app.watchlist_manager.filepath)
         self.assertEqual([item["key"] for item in reloaded.instruments], expected)
         self.assertEqual((self.app.root.winfo_x(), self.app.root.winfo_y()), original_position)
 
@@ -415,9 +420,10 @@ class IsolatedTkSmokeTest(unittest.TestCase):
             with patch.object(self.app, "_cached_history_series", return_value=(
                 [("2026-10-23 12:00:00", 100), ("2026-10-24 12:00:00", 125)], "test", "5m"
             )) as history:
-                rows, change = self.app._sparkline_data("thyao", 125)
+                rows, change, breaks = self.app._sparkline_data("thyao", 125)
                 self.assertEqual([price for _time, price in rows], [100, 125])
                 self.assertEqual(change, 25)
+                self.assertEqual(breaks, (1,))
                 history.assert_called_once_with("thyao", seconds)
             self.assertEqual(self.app._load_preferences()["sparkline_period"], seconds)
         self.assertEqual(self.app.chart_period.get(), main_chart_period)
@@ -528,11 +534,11 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         self.assertTrue(self.app.root.attributes("-topmost"))
 
     def test_widget_placement_accepts_negative_monitor_coordinates_and_falls_back(self):
-        widget = main.PiyasaWidget.__new__(main.PiyasaWidget)
+        widget = widget_module.PiyasaWidget.__new__(widget_module.PiyasaWidget)
         widget._preferences = {"widget_geometry": {"width": 368, "height": 536, "x": -410, "y": -70}}
-        with patch.object(main, "monitor_work_area", return_value=(-1920, -100, 0, 900)):
+        with patch.object(widget_module, "monitor_work_area", return_value=(-1920, -100, 0, 900)):
             self.assertEqual(widget._initial_widget_geometry(1920, 1080), (368, 536, -410, -70))
-        with patch.object(main, "monitor_work_area", return_value=None):
+        with patch.object(widget_module, "monitor_work_area", return_value=None):
             self.assertEqual(
                 widget._initial_widget_geometry(1920, 1080),
                 widget.calculate_default_geometry(1920, 1080),
@@ -595,7 +601,7 @@ class IsolatedTkSmokeTest(unittest.TestCase):
             self.dialog = None
 
     def test_curves_and_icons_have_antialiased_edges_at_different_sizes(self):
-        from rendering import render_icon, render_chart_line
+        from piyasa.ui.rendering import render_icon, render_chart_line
 
         for size in (24, 32, 48):
             for icon in ("settings", "refresh", "previous", "next", "edit", "delete"):
@@ -613,7 +619,7 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         self._require_tk()
         self.root = tk.Tk()
         self.root.withdraw()
-        manager = main.TransactionManager(os.path.join(self.temp_dir.name, "transactions.json"))
+        manager = transactions.TransactionManager(os.path.join(self.temp_dir.name, "transactions.json"))
         records = [
             ("31-12-2025", "thyao", "buy", 10, 100),
             ("02-01-2026", "thyao", "buy", 2, 900),
@@ -623,7 +629,7 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         for date, key, action, quantity, total in records:
             manager.save({"date": date, "instrument_key": key, "action": action,
                           "quantity": quantity, "currency": "TL", "total_tl": total})
-        self.dialog = main.PortfolioManagerDialog(self.root, manager, lambda: None, 40, main.default_watchlist())
+        self.dialog = portfolio_dialog.PortfolioManagerDialog(self.root, manager, lambda: None, 40, instruments.default_watchlist())
         self.dialog.withdraw()
         self.assertTrue(self.dialog.overrideredirect())
         original = copy.deepcopy(manager.transactions)
@@ -658,8 +664,8 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         self.root.withdraw()
 
         transaction_path = os.path.join(self.temp_dir.name, "transactions.json")
-        manager = main.TransactionManager(transaction_path)
-        instruments = main.default_watchlist() + [
+        manager = transactions.TransactionManager(transaction_path)
+        test_instruments = instruments.default_watchlist() + [
             {
                 "key": "aapl",
                 "label": "Apple",
@@ -708,12 +714,12 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         original_transactions = copy.deepcopy(manager.transactions)
         callback_calls = []
 
-        self.dialog = main.PortfolioManagerDialog(
+        self.dialog = portfolio_dialog.PortfolioManagerDialog(
             self.root,
             manager,
             lambda: callback_calls.append(True),
             40.0,
-            instruments,
+            test_instruments,
         )
         self.dialog.withdraw()
 
@@ -780,11 +786,11 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         self._require_tk()
         self.root = tk.Tk()
         self.root.withdraw()
-        manager = main.WatchlistManager(
+        manager = watchlist.WatchlistManager(
             os.path.join(self.temp_dir.name, "watchlist.json")
         )
         callback_calls = []
-        self.dialog = main.WatchlistDialog(
+        self.dialog = watchlist_dialog.WatchlistDialog(
             self.root,
             manager,
             lambda: callback_calls.append(True),
@@ -797,7 +803,7 @@ class IsolatedTkSmokeTest(unittest.TestCase):
             set(self.dialog.tree.get_children()),
             {instrument["key"] for instrument in manager.instruments},
         )
-        self.assertIsInstance(self.dialog.btn_add, main.HoverButton)
+        self.assertIsInstance(self.dialog.btn_add, components.HoverButton)
         self.assertEqual(self.dialog.btn_add.cget("state"), "normal")
         self.assertEqual(str(self.dialog.combo_currency.cget("state")), "readonly")
         self.dialog._finish_add("Apple", "AAPL", "$", None)
@@ -811,7 +817,7 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         self.root = tk.Tk()
         self.root.withdraw()
         transaction_path = os.path.join(self.temp_dir.name, "transactions.json")
-        manager = main.TransactionManager(transaction_path)
+        manager = transactions.TransactionManager(transaction_path)
         manager.save(
             {
                 "date": "01-01-2026",
@@ -824,12 +830,12 @@ class IsolatedTkSmokeTest(unittest.TestCase):
             }
         )
         callback_calls = []
-        self.dialog = main.PortfolioManagerDialog(
+        self.dialog = portfolio_dialog.PortfolioManagerDialog(
             self.root,
             manager,
             lambda: callback_calls.append(True),
             40.0,
-            main.default_watchlist(),
+            instruments.default_watchlist(),
         )
         self.dialog.withdraw()
 
@@ -854,7 +860,7 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         self.assertEqual(manager.normalize_transaction(manager.transactions[1])["quantity"], 3)
         self.assertEqual(callback_calls, [True, True])
 
-        with patch.object(main.tk.messagebox, "askyesno", return_value=True):
+        with patch.object(messagebox, "askyesno", return_value=True):
             self.dialog.delete_transaction("1")
         self.assertEqual(len(manager.transactions), 1)
         self.assertEqual(callback_calls, [True, True, True])
@@ -867,15 +873,15 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         self._require_tk()
         self.root = tk.Tk()
         self.root.withdraw()
-        manager = main.TransactionManager(os.path.join(self.temp_dir.name, "transactions.json"))
+        manager = transactions.TransactionManager(os.path.join(self.temp_dir.name, "transactions.json"))
         rate = 30.123456
         manager.save({
             "date": "01-01-2026", "instrument_key": "thyao", "action": "buy",
             "quantity": 2, "currency": "USD", "total_usd": 20, "fx_rate": rate,
             "total_tl": 20 * rate,
         })
-        self.dialog = main.PortfolioManagerDialog(
-            self.root, manager, lambda: None, None, main.default_watchlist()
+        self.dialog = portfolio_dialog.PortfolioManagerDialog(
+            self.root, manager, lambda: None, None, instruments.default_watchlist()
         )
         self.dialog.withdraw()
         self.assertEqual(self.dialog.entry_rate.get(), "")
@@ -889,7 +895,7 @@ class IsolatedTkSmokeTest(unittest.TestCase):
         self.dialog.var_currency.set("USD")
         self.dialog.entry_amount.insert(0, "1")
         self.dialog.entry_total.insert(0, "20")
-        with patch.object(main.tk.messagebox, "showerror") as show_error:
+        with patch.object(messagebox, "showerror") as show_error:
             self.dialog.save()
         show_error.assert_called_once()
         self.assertEqual(len(manager.transactions), 1)

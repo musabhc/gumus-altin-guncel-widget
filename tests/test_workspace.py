@@ -8,7 +8,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import main
+from piyasa import paths
+from piyasa import widget as widget_module
+from piyasa.market import cache, instruments
+from piyasa.portfolio import transactions
 
 
 class TestDesktopWorkspace(unittest.TestCase):
@@ -28,16 +31,16 @@ class TestDesktopWorkspace(unittest.TestCase):
              "quantity": 10, "total_tl": 2800, "action": "buy", "currency": "TL"},
         ]), encoding="utf-8")
         self.before = self.records.read_bytes()
-        patcher = patch.object(main, "APP_DIR", os.fspath(self.directory))
+        patcher = patch.object(paths, "APP_DIR", os.fspath(self.directory))
         patcher.start()
         self.addCleanup(patcher.stop)
-        with patch.object(main.PiyasaWidget, "make_toolwindow"), patch.object(main.PiyasaWidget, "veri_dongusu"):
-            self.app = main.PiyasaWidget()
+        with patch.object(widget_module.PiyasaWidget, "make_toolwindow"), patch.object(widget_module.PiyasaWidget, "veri_dongusu"):
+            self.app = widget_module.PiyasaWidget()
         self.addCleanup(self.app.history_db.conn.close)
         self.addCleanup(self.app.root.destroy)
         self.app.root.withdraw()
-        self.app.guncelle_arayuz(main.market_data_for_save(
-            {"thyao": 310, "gumus_tl": 56}, "26.11 17:35", {"gumus_tl": main.SILVER_SPOT_SYMBOL}
+        self.app.guncelle_arayuz(cache.market_data_for_save(
+            {"thyao": 310, "gumus_tl": 56}, "26.11 17:35", {"gumus_tl": instruments.SILVER_SPOT_SYMBOL}
         ))
 
     def test_navigation_and_quotes_keep_legacy_cost_and_do_not_write_ledger(self):
@@ -51,7 +54,7 @@ class TestDesktopWorkspace(unittest.TestCase):
         self.assertEqual(before_quote[2], "₺280,00 / adet")
         self.assertEqual(overview.item("gumus_tl", "values")[2], "₺40,00 / g")
 
-        self.app.guncelle_arayuz(main.market_data_for_save({"thyao": 325}, "26.11 17:36"))
+        self.app.guncelle_arayuz(cache.market_data_for_save({"thyao": 325}, "26.11 17:36"))
         after_quote = overview.item("thyao", "values")
         self.assertEqual(after_quote[2], before_quote[2])
         self.assertNotEqual(after_quote[3], before_quote[3])
@@ -77,9 +80,9 @@ class TestDesktopWorkspace(unittest.TestCase):
         dialog.entry_total.insert(0, "3000")
         dialog.save()
         self.assertEqual(self.app.tm.get_average_cost("thyao"), 300)
-        self.assertEqual(main.TransactionManager(os.fspath(self.records)).get_average_cost("thyao"), 300)
+        self.assertEqual(transactions.TransactionManager(os.fspath(self.records)).get_average_cost("thyao"), 300)
         self.assertEqual([row["source_index"] for row in view.trade_table.rows], [1])
-        with patch.object(main.messagebox, "askyesno", return_value=True):
+        with patch.object(widget_module.messagebox, "askyesno", return_value=True):
             view._delete_trade("1")
         self.assertEqual(view.trade_table.rows, [])
         self.assertIsNone(self.app.tm.get_average_cost("thyao"))
@@ -118,7 +121,7 @@ class TestDesktopWorkspace(unittest.TestCase):
 
     def test_unreadable_ledger_is_not_shown_as_zero_portfolio(self):
         self.records.write_text('{"incomplete":true}', encoding="utf-8")
-        self.app.tm = main.TransactionManager(os.fspath(self.records))
+        self.app.tm = transactions.TransactionManager(os.fspath(self.records))
         view = self.app.open_workspace("portfolio")
         self.assertIn("okunamadı", view.status_label.cget("text"))
         self.assertEqual(view.metrics["portfolio"][0][0].cget("text"), "—")

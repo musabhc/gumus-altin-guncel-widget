@@ -84,7 +84,8 @@ def merge_observations(prices, computed_keys, instruments, raw_quotes, old_quote
                 continue
             # A derived price is no newer than its oldest known component.
             price_at = min(meta["price_at"], fx["price_at"]) if meta["price_at"] and fx["price_at"] else ""
-            meta = observation(provider, observed_at, price_at=price_at)
+            market_state = "CLOSED" if meta["market_state"] == fx["market_state"] == "CLOSED" else ""
+            meta = observation(provider, observed_at, price_at=price_at, market_state=market_state)
         observations[key] = dict(meta)
     return observations
 
@@ -128,5 +129,7 @@ def quote_status(price, meta, *, compact=False):
         label = f"{label} {stamp}"
     session = SESSIONS.get(meta.get("market_state"), "")
     if compact:
+        if meta.get("market_state") == "CLOSED":
+            return f"Kapalı · {stamp}" if stamp else "Seans kapalı"
         return label
     return " · ".join(part for part in (label, meta.get("provider"), session or "Seans bilgisi yok") if part)

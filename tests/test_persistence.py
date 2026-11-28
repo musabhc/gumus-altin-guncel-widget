@@ -1,15 +1,15 @@
 import json
 import os
 import sqlite3
-import sys
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-import main
+from piyasa import widget as widget_module
+from piyasa.market import cache, history, instruments, quotes, series, watchlist
+from piyasa.portfolio import transactions
 
 
 class FakeTicker:
@@ -26,8 +26,9 @@ class FakeTickers:
 class TestDynamicMarketPersistence(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.widget = main.PiyasaWidget.__new__(main.PiyasaWidget)
-        self.widget.watchlist = main.default_watchlist()
+        self.addCleanup(self.tmp.cleanup)
+        self.widget = widget_module.PiyasaWidget.__new__(widget_module.PiyasaWidget)
+        self.widget.watchlist = instruments.default_watchlist()
         self.widget.market_data_path = os.path.join(self.tmp.name, "market_data.json")
         self.widget._fetch_lock = threading.Lock()
         self.widget.root = MagicMock()
@@ -56,9 +57,6 @@ class TestDynamicMarketPersistence(unittest.TestCase):
         self.widget.color_success_bg = "#10261a"
         self.widget.color_danger_bg = "#2a1214"
         self.widget.color_card_alt = "#10161d"
-
-    def tearDown(self):
-        self.tmp.cleanup()
 
     def test_legacy_market_data_is_loaded_as_prices_map(self):
         data = {
@@ -105,7 +103,7 @@ class TestDynamicMarketPersistence(unittest.TestCase):
         }
 
         with (
-            patch.object(main.yf, "Tickers", return_value=FakeTickers(prices)),
+            patch.object(widget_module.yf, "Tickers", return_value=FakeTickers(prices)),
             patch.object(self.widget, "_fetch_spot_silver_price", return_value=30.0),
         ):
             self.widget.veri_getir()
@@ -113,8 +111,8 @@ class TestDynamicMarketPersistence(unittest.TestCase):
         loaded = self.widget.load_last_data()
         self.assertEqual(loaded["prices"]["thyao"], 300.0)
         self.assertEqual(loaded["prices"]["gumus_ons"], 30.0)
-        self.assertAlmostEqual(loaded["prices"]["gumus_tl"], (30.0 * 40.0) / main.TROY_OUNCE_GRAMS)
-        self.assertEqual(loaded["sources"]["gumus_ons"], main.SILVER_SPOT_SYMBOL)
+        self.assertAlmostEqual(loaded["prices"]["gumus_tl"], (30.0 * 40.0) / instruments.TROY_OUNCE_GRAMS)
+        self.assertEqual(loaded["sources"]["gumus_ons"], instruments.SILVER_SPOT_SYMBOL)
         self.widget.price_vars["thyao"].set.assert_called_with("₺300,00")
 
         inserted_prices = {key: value for call in self.widget.history_db.insert_prices.call_args_list
@@ -123,7 +121,7 @@ class TestDynamicMarketPersistence(unittest.TestCase):
 
     def test_partial_refresh_keeps_old_timestamp_and_marks_old_fx(self):
         old = "2026-11-24T09:00:00+00:00"
-        self.widget.save_last_data(main.market_data_for_save(
+        self.widget.save_last_data(cache.market_data_for_save(
             {"thyao": 300, "dolar": 40}, sources={"thyao": "THYAO.IS", "dolar": "TRY=X"},
             quotes={"thyao": {"observed_at": old, "price_at": old, "provider": "Yahoo Finance", "state": "received"}},
         ))
@@ -142,8 +140,50 @@ class TestDynamicMarketPersistence(unittest.TestCase):
         inserted = {key for call in self.widget.history_db.insert_prices.call_args_list for key in call.args[0]}
         self.assertEqual(inserted, {"gumus_ons"})
 
+    def test_unchanged_prices_without_provider_time_do_not_extend_history(self):
+        self.widget.history_db = history.MarketHistoryDB(os.path.join(self.tmp.name, "history.db"))
+        self.addCleanup(self.widget.history_db.conn.close)
+        first = datetime(2026, 11, 27, 14, tzinfo=timezone.utc)
+        next_day = datetime(2026, 11, 28, 9, tzinfo=timezone.utc)
+        monday = datetime(2026, 11, 30, 9, tzinfo=timezone.utc)
+        thyao = {"THYAO.IS": 300.0}
+        with (
+            patch.object(self.widget, "_fetch_raw_prices", return_value=thyao) as fetch,
+            patch.object(self.widget, "_fetch_spot_silver_price", return_value=0),
+            patch.object(widget_module, "datetime", wraps=datetime) as clock,
+        ):
+            clock.now.side_effect = (first, next_day, monday)
+            self.widget.veri_getir()
+            self.widget.veri_getir()
+            self.assertEqual(self.widget.load_last_data()["quotes"]["thyao"]["observed_at"], first.isoformat())
+            fetch.return_value = {"THYAO.IS": 305.0}
+            self.widget.veri_getir()
+        rows = self.widget.history_db.get_all_history("thyao")
+        self.assertEqual(rows, [
+            (series.normalize_history_timestamp(first), 300.0),
+            (series.normalize_history_timestamp(monday), 305.0),
+        ])
+
+    def test_repeated_timed_close_is_retained_and_labelled(self):
+        self.widget.history_db = history.MarketHistoryDB(os.path.join(self.tmp.name, "history.db"))
+        self.addCleanup(self.widget.history_db.conn.close)
+        close = "2026-11-27T15:00:00+00:00"
+
+        def fetch(_symbols, *, metadata):
+            metadata["THYAO.IS"] = quotes.observation("Yahoo Finance", close, price_at=close, market_state="CLOSED")
+            return {"THYAO.IS": 300.0}
+
+        with (
+            patch.object(self.widget, "_fetch_raw_prices", side_effect=fetch),
+            patch.object(self.widget, "_fetch_spot_silver_price", return_value=0),
+        ):
+            self.widget.veri_getir()
+            self.widget.veri_getir()
+        self.assertEqual(len(self.widget.history_db.get_all_history("thyao")), 1)
+        self.assertTrue(self.widget.workspace_quote_status("thyao", compact=True).startswith("Kapalı · "))
+
     def test_usd_priced_watchlist_items_require_dollar_rate(self):
-        widget = main.PiyasaWidget.__new__(main.PiyasaWidget)
+        widget = widget_module.PiyasaWidget.__new__(widget_module.PiyasaWidget)
         widget.watchlist = [{
             "key": "aapl",
             "label": "AAPL",
@@ -156,7 +196,7 @@ class TestDynamicMarketPersistence(unittest.TestCase):
 
         self.assertIn("TRY=X", widget._required_yahoo_symbols())
         self.assertNotIn(
-            main.SILVER_SPOT_SYMBOL,
+            instruments.SILVER_SPOT_SYMBOL,
             self.widget._required_yahoo_symbols()
         )
 
@@ -174,30 +214,30 @@ class TestDynamicMarketPersistence(unittest.TestCase):
             "currency": "USD",
             "price": 70.35,
         }
-        with patch.object(main.requests, "get", return_value=response) as get:
+        with patch.object(widget_module.requests, "get", return_value=response) as get:
             price = self.widget._fetch_spot_silver_price()
 
         self.assertEqual(price, 70.35)
         get.assert_called_once_with(
-            main.SILVER_SPOT_API_URL,
+            instruments.SILVER_SPOT_API_URL,
             headers={"User-Agent": "Disa-Finans-Widget/1.0"},
             timeout=10
         )
 
     def test_spot_gram_price_can_use_last_known_dollar_rate(self):
         prices, fresh = self.widget._resolve_watchlist_prices(
-            {main.SILVER_SPOT_SYMBOL: 70.0},
+            {instruments.SILVER_SPOT_SYMBOL: 70.0},
             {"dolar": 40.0}
         )
 
         self.assertIn("gumus_tl", fresh)
         self.assertAlmostEqual(
             prices["gumus_tl"],
-            (70.0 * 40.0) / main.TROY_OUNCE_GRAMS
+            (70.0 * 40.0) / instruments.TROY_OUNCE_GRAMS
         )
 
     def test_legacy_futures_cache_is_not_reused_for_spot_rows(self):
-        cached = main.market_data_for_save({
+        cached = cache.market_data_for_save({
             "gumus_ons": 71.0,
             "gumus_tl": 103.0,
             "thyao": 300.0,
@@ -229,7 +269,7 @@ class TestDynamicMarketPersistence(unittest.TestCase):
         conn.commit()
         conn.close()
 
-        db = main.MarketHistoryDB(db_path)
+        db = history.MarketHistoryDB(db_path)
         try:
             stats = db.get_stats("gumus_tl")
             self.assertEqual(stats[3], 1)
@@ -239,23 +279,23 @@ class TestDynamicMarketPersistence(unittest.TestCase):
 
     def test_silver_history_can_be_filtered_by_quote_source(self):
         db_path = os.path.join(self.tmp.name, "source_history.db")
-        db = main.MarketHistoryDB(db_path)
+        db = history.MarketHistoryDB(db_path)
         try:
             futures = [{
                 "key": "gumus_ons",
                 "label": "Gümüş ONS",
-                "symbol": main.LEGACY_SILVER_FUTURES_SYMBOL,
+                "symbol": instruments.LEGACY_SILVER_FUTURES_SYMBOL,
             }]
             spot = [{
                 "key": "gumus_ons",
                 "label": "Gümüş ONS",
-                "symbol": main.SILVER_SPOT_SYMBOL,
+                "symbol": instruments.SILVER_SPOT_SYMBOL,
             }]
-            now = main.datetime.now()
+            now = widget_module.datetime.now()
             db.insert_prices(
                 {"gumus_ons": 71.0},
                 futures,
-                timestamp=(now - main.timedelta(minutes=1)).isoformat()
+                timestamp=(now - widget_module.timedelta(minutes=1)).isoformat()
             )
             db.insert_prices(
                 {"gumus_ons": 70.0},
@@ -264,7 +304,7 @@ class TestDynamicMarketPersistence(unittest.TestCase):
             )
 
             rows = db.get_history(
-                "gumus_ons", days=1, source_symbol=main.SILVER_SPOT_SYMBOL
+                "gumus_ons", days=1, source_symbol=instruments.SILVER_SPOT_SYMBOL
             )
 
             self.assertEqual([row[1] for row in rows], [70.0])
@@ -273,15 +313,38 @@ class TestDynamicMarketPersistence(unittest.TestCase):
 
 
 class TestHistoricalChartInfrastructure(unittest.TestCase):
+    def test_live_chart_recovers_prices_before_legacy_flat_tail(self):
+        widget = widget_module.PiyasaWidget.__new__(widget_module.PiyasaWidget)
+        widget.watchlist = instruments.default_watchlist()
+        with tempfile.TemporaryDirectory() as directory:
+            db = history.MarketHistoryDB(os.path.join(directory, "history.db"))
+            widget.history_db = db
+            rows = [
+                ("2026-11-27T17:40:00", 295.0),
+                ("2026-11-27T17:45:00", 295.0),
+                ("2026-11-27T17:50:00", 300.0),
+                ("2026-11-28T10:00:00", 300.0),
+                ("2026-11-29T10:00:00", 300.0),
+            ]
+            try:
+                for stamp, value in rows:
+                    db.insert_prices({"thyao": value}, widget.watchlist, timestamp=stamp)
+                series_rows, source, interval = widget._cached_history_series("thyao", 1800)
+                self.assertEqual(series_rows, [rows[0], rows[2]])
+                self.assertEqual((source, interval), ("THYAO.IS", "live"))
+                self.assertEqual(db.get_all_history("thyao"), rows)
+            finally:
+                db.conn.close()
+
     def test_default_widget_geometry_matches_reference_desktop(self):
         self.assertEqual(
-            main.PiyasaWidget.calculate_default_geometry(1920, 1080),
+            widget_module.PiyasaWidget.calculate_default_geometry(1920, 1080),
             (368, 536, 1522, 50),
         )
 
     def test_chart_periods_cover_all_requested_windows(self):
         self.assertEqual(
-            main.PiyasaWidget.CHART_PERIOD_OPTIONS,
+            widget_module.PiyasaWidget.CHART_PERIOD_OPTIONS,
             (
                 ("30 dakika", 30 * 60),
                 ("1 saat", 60 * 60),
@@ -295,7 +358,7 @@ class TestHistoricalChartInfrastructure(unittest.TestCase):
         )
 
     def test_zoom_and_pan_ranges_are_clamped_and_preserve_span(self):
-        zoomed = main.calculate_zoomed_range(
+        zoomed = series.calculate_zoomed_range(
             0.0,
             1.0,
             True,
@@ -306,10 +369,10 @@ class TestHistoricalChartInfrastructure(unittest.TestCase):
         self.assertAlmostEqual(zoomed[1] - zoomed[0], 0.65)
 
         self.assertEqual(
-            main.calculate_panned_range(0.2, 0.6, -1.0),
+            series.calculate_panned_range(0.2, 0.6, -1.0),
             (0.0, 0.4),
         )
-        right_clamped = main.calculate_panned_range(0.2, 0.6, 1.0)
+        right_clamped = series.calculate_panned_range(0.2, 0.6, 1.0)
         self.assertAlmostEqual(right_clamped[0], 0.6)
         self.assertAlmostEqual(right_clamped[1], 1.0)
         self.assertAlmostEqual(right_clamped[1] - right_clamped[0], 0.4)
@@ -322,7 +385,7 @@ class TestHistoricalChartInfrastructure(unittest.TestCase):
             )
         ]
 
-        sampled = main.downsample_history_rows(rows, 6)
+        sampled = series.downsample_history_rows(rows, 6)
 
         self.assertLessEqual(len(sampled), 6)
         self.assertEqual(sampled[0], rows[0])
@@ -336,17 +399,17 @@ class TestHistoricalChartInfrastructure(unittest.TestCase):
 
     def test_history_rows_are_interval_aware_and_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db = main.MarketHistoryDB(os.path.join(tmp, "history.db"))
+            db = history.MarketHistoryDB(os.path.join(tmp, "history.db"))
             instrument = {
                 "key": "thyao",
                 "label": "THYAO",
                 "symbol": "THYAO.IS",
             }
-            now = main.datetime.now().replace(microsecond=0)
+            now = widget_module.datetime.now().replace(microsecond=0)
             rows = [
-                ((now - main.timedelta(hours=2)).isoformat(), 285.0),
-                ((now - main.timedelta(minutes=50)).isoformat(), 290.0),
-                ((now - main.timedelta(minutes=10)).isoformat(), 295.0),
+                ((now - widget_module.timedelta(hours=2)).isoformat(), 285.0),
+                ((now - widget_module.timedelta(minutes=50)).isoformat(), 290.0),
+                ((now - widget_module.timedelta(minutes=10)).isoformat(), 295.0),
             ]
             try:
                 self.assertEqual(
@@ -399,16 +462,16 @@ class TestHistoricalChartInfrastructure(unittest.TestCase):
 
     def test_metal_history_uses_latest_prior_fx_and_rejects_stale_fx(self):
         base_rows = [
-            ("2026-01-01T10:30:00", main.TROY_OUNCE_GRAMS),
-            ("2026-01-01T11:30:00", 2 * main.TROY_OUNCE_GRAMS),
-            ("2026-01-06T12:00:00", main.TROY_OUNCE_GRAMS),
+            ("2026-01-01T10:30:00", instruments.TROY_OUNCE_GRAMS),
+            ("2026-01-01T11:30:00", 2 * instruments.TROY_OUNCE_GRAMS),
+            ("2026-01-06T12:00:00", instruments.TROY_OUNCE_GRAMS),
         ]
         fx_rows = [
             ("2026-01-01T10:00:00", 40.0),
             ("2026-01-01T11:00:00", 42.0),
         ]
 
-        converted = main.PiyasaWidget._combine_history_with_fx(
+        converted = widget_module.PiyasaWidget._combine_history_with_fx(
             base_rows,
             fx_rows,
         )
@@ -421,10 +484,10 @@ class TestHistoricalChartInfrastructure(unittest.TestCase):
         self.assertAlmostEqual(converted[1][1], 84.0)
 
     def test_intraday_fx_conversion_rejects_a_stale_quote(self):
-        converted = main.PiyasaWidget._combine_history_with_fx(
+        converted = widget_module.PiyasaWidget._combine_history_with_fx(
             [
-                ("2026-01-01T10:10:00", main.TROY_OUNCE_GRAMS),
-                ("2026-01-01T10:20:00", main.TROY_OUNCE_GRAMS),
+                ("2026-01-01T10:10:00", instruments.TROY_OUNCE_GRAMS),
+                ("2026-01-01T10:20:00", instruments.TROY_OUNCE_GRAMS),
             ],
             [("2026-01-01T10:00:00", 40.0)],
             "5m",
@@ -434,7 +497,7 @@ class TestHistoricalChartInfrastructure(unittest.TestCase):
 
     def test_latest_anchored_window_works_for_a_closed_market(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db = main.MarketHistoryDB(os.path.join(tmp, "history.db"))
+            db = history.MarketHistoryDB(os.path.join(tmp, "history.db"))
             instrument = {
                 "key": "thyao",
                 "label": "THYAO",
@@ -471,25 +534,25 @@ class TestHistoricalChartInfrastructure(unittest.TestCase):
 
     def test_silver_chart_prefers_proxy_bars_without_mixing_spot_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
-            widget = main.PiyasaWidget.__new__(main.PiyasaWidget)
-            widget.watchlist = main.default_watchlist()
-            widget.history_db = main.MarketHistoryDB(
+            widget = widget_module.PiyasaWidget.__new__(widget_module.PiyasaWidget)
+            widget.watchlist = instruments.default_watchlist()
+            widget.history_db = history.MarketHistoryDB(
                 os.path.join(tmp, "history.db")
             )
             silver = next(
                 item for item in widget.watchlist
                 if item["key"] == "gumus_ons"
             )
-            now = main.datetime.now().replace(microsecond=0)
+            now = widget_module.datetime.now().replace(microsecond=0)
             try:
                 widget.history_db.insert_history_rows(
                     silver,
                     [
-                        ((now - main.timedelta(minutes=10)).isoformat(), 60.0),
+                        ((now - widget_module.timedelta(minutes=10)).isoformat(), 60.0),
                         (now.isoformat(), 61.0),
                     ],
                     "5m",
-                    source_symbol=main.SILVER_HISTORY_PROXY_SYMBOL,
+                    source_symbol=instruments.SILVER_HISTORY_PROXY_SYMBOL,
                 )
                 widget.history_db.insert_prices(
                     {"gumus_ons": 80.0},
@@ -502,7 +565,7 @@ class TestHistoricalChartInfrastructure(unittest.TestCase):
                 )
 
                 self.assertEqual([price for _timestamp, price in rows], [60.0, 61.0])
-                self.assertEqual(source, main.SILVER_HISTORY_PROXY_SYMBOL)
+                self.assertEqual(source, instruments.SILVER_HISTORY_PROXY_SYMBOL)
                 self.assertEqual(interval, "5m")
             finally:
                 widget.history_db.conn.close()
@@ -511,7 +574,7 @@ class TestHistoricalChartInfrastructure(unittest.TestCase):
         values = [float(value) for value in range(1, 301)]
         timestamps = [f"2026-01-{(index % 28) + 1:02d}" for index in range(300)]
 
-        filtered, filtered_timestamps = main.PiyasaWidget._filter_outliers(
+        filtered, filtered_timestamps = widget_module.PiyasaWidget._filter_outliers(
             values, timestamps
         )
 
@@ -519,10 +582,10 @@ class TestHistoricalChartInfrastructure(unittest.TestCase):
         self.assertEqual(filtered_timestamps, timestamps)
 
     def test_yahoo_history_uses_adjusted_prices(self):
-        widget = main.PiyasaWidget.__new__(main.PiyasaWidget)
+        widget = widget_module.PiyasaWidget.__new__(widget_module.PiyasaWidget)
         ticker = MagicMock()
         ticker.history.return_value = None
-        with patch.object(main.yf, "Ticker", return_value=ticker):
+        with patch.object(widget_module.yf, "Ticker", return_value=ticker):
             self.assertEqual(widget._download_yahoo_history("THYAO.IS", "1d"), [])
 
         self.assertTrue(ticker.history.call_args.kwargs["auto_adjust"])
@@ -530,13 +593,13 @@ class TestHistoricalChartInfrastructure(unittest.TestCase):
 
     def test_history_sync_persists_provider_bars_and_marks_profile_fresh(self):
         with tempfile.TemporaryDirectory() as tmp:
-            widget = main.PiyasaWidget.__new__(main.PiyasaWidget)
+            widget = widget_module.PiyasaWidget.__new__(widget_module.PiyasaWidget)
             instrument = next(
-                item for item in main.default_watchlist()
+                item for item in instruments.default_watchlist()
                 if item["key"] == "thyao"
             )
             widget.watchlist = [instrument]
-            widget.history_db = main.MarketHistoryDB(
+            widget.history_db = history.MarketHistoryDB(
                 os.path.join(tmp, "history.db")
             )
             widget._stop_event = threading.Event()
@@ -549,7 +612,7 @@ class TestHistoricalChartInfrastructure(unittest.TestCase):
             )
             try:
                 inserted = widget._sync_history_profile(
-                    "5m", main.timedelta(minutes=30)
+                    "5m", widget_module.timedelta(minutes=30)
                 )
 
                 self.assertEqual(inserted, 2)
@@ -566,7 +629,7 @@ class TestHistoricalChartInfrastructure(unittest.TestCase):
                         "thyao",
                         "THYAO.IS",
                         "5m",
-                        main.timedelta(minutes=30),
+                        widget_module.timedelta(minutes=30),
                     )
                 )
             finally:
@@ -577,7 +640,7 @@ class TestMultiAssetPortfolio(unittest.TestCase):
     def test_legacy_transactions_are_read_as_silver_position(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "transactions.json")
-            manager = main.TransactionManager(path)
+            manager = transactions.TransactionManager(path)
             manager.save({
                 "date": "01-01-2026",
                 "amount_g": 10,
@@ -585,7 +648,7 @@ class TestMultiAssetPortfolio(unittest.TestCase):
                 "currency": "TL",
             })
 
-            summary = manager.get_portfolio_summary({"gumus_tl": 120}, main.default_watchlist())
+            summary = manager.get_portfolio_summary({"gumus_tl": 120}, instruments.default_watchlist())
 
             self.assertEqual(summary["rows"][0]["key"], "gumus_tl")
             self.assertEqual(summary["rows"][0]["quantity"], 10)
@@ -594,7 +657,7 @@ class TestMultiAssetPortfolio(unittest.TestCase):
 
     def test_thyao_buy_is_included_in_total_assets(self):
         with tempfile.TemporaryDirectory() as tmp:
-            manager = main.TransactionManager(os.path.join(tmp, "transactions.json"))
+            manager = transactions.TransactionManager(os.path.join(tmp, "transactions.json"))
             manager.save({
                 "date": "01-01-2026",
                 "instrument_key": "thyao",
@@ -605,7 +668,7 @@ class TestMultiAssetPortfolio(unittest.TestCase):
                 "total_tl": 4200,
             })
 
-            summary = manager.get_portfolio_summary({"thyao": 300}, main.default_watchlist())
+            summary = manager.get_portfolio_summary({"thyao": 300}, instruments.default_watchlist())
 
             self.assertEqual(summary["total_value_tl"], 4500)
             self.assertEqual(summary["rows"][0]["label"], "THYAO")
@@ -613,8 +676,8 @@ class TestMultiAssetPortfolio(unittest.TestCase):
 
     def test_multi_asset_summary_converts_usd_assets_to_tl(self):
         with tempfile.TemporaryDirectory() as tmp:
-            manager = main.TransactionManager(os.path.join(tmp, "transactions.json"))
-            watchlist = main.default_watchlist() + [{
+            manager = transactions.TransactionManager(os.path.join(tmp, "transactions.json"))
+            watchlist = instruments.default_watchlist() + [{
                 "key": "aapl",
                 "label": "AAPL",
                 "symbol": "AAPL",
@@ -634,11 +697,11 @@ class TestMultiAssetPortfolio(unittest.TestCase):
 
     def test_sell_reduces_quantity_and_rejects_oversell(self):
         with tempfile.TemporaryDirectory() as tmp:
-            manager = main.TransactionManager(os.path.join(tmp, "transactions.json"))
+            manager = transactions.TransactionManager(os.path.join(tmp, "transactions.json"))
             manager.save({"date": "01-01-2026", "instrument_key": "thyao", "instrument_label": "THYAO", "action": "buy", "quantity": 10, "currency": "TL", "total_tl": 1000})
             manager.save({"date": "02-01-2026", "instrument_key": "thyao", "instrument_label": "THYAO", "action": "sell", "quantity": 4, "currency": "TL", "total_tl": 600})
 
-            summary = manager.get_portfolio_summary({"thyao": 120}, main.default_watchlist())
+            summary = manager.get_portfolio_summary({"thyao": 120}, instruments.default_watchlist())
 
             self.assertEqual(summary["rows"][0]["quantity"], 6)
             self.assertEqual(summary["rows"][0]["cost_basis_tl"], 600)
@@ -647,12 +710,12 @@ class TestMultiAssetPortfolio(unittest.TestCase):
 
     def test_replace_updates_transaction_and_validates_sell_quantity(self):
         with tempfile.TemporaryDirectory() as tmp:
-            manager = main.TransactionManager(os.path.join(tmp, "transactions.json"))
+            manager = transactions.TransactionManager(os.path.join(tmp, "transactions.json"))
             manager.save({"date": "01-01-2026", "instrument_key": "thyao", "instrument_label": "THYAO", "action": "buy", "quantity": 10, "currency": "TL", "total_tl": 1000})
             manager.save({"date": "02-01-2026", "instrument_key": "thyao", "instrument_label": "THYAO", "action": "sell", "quantity": 2, "currency": "TL", "total_tl": 300})
 
             manager.replace(0, {"date": "01-01-2026", "instrument_key": "thyao", "instrument_label": "THYAO", "action": "buy", "quantity": 12, "currency": "TL", "total_tl": 1200})
-            summary = manager.get_portfolio_summary({"thyao": 150}, main.default_watchlist())
+            summary = manager.get_portfolio_summary({"thyao": 150}, instruments.default_watchlist())
 
             self.assertEqual(summary["rows"][0]["quantity"], 10)
             with self.assertRaises(ValueError):
@@ -660,10 +723,10 @@ class TestMultiAssetPortfolio(unittest.TestCase):
 
     def test_missing_price_keeps_asset_row_but_counts_zero(self):
         with tempfile.TemporaryDirectory() as tmp:
-            manager = main.TransactionManager(os.path.join(tmp, "transactions.json"))
+            manager = transactions.TransactionManager(os.path.join(tmp, "transactions.json"))
             manager.save({"date": "01-01-2026", "instrument_key": "thyao", "instrument_label": "THYAO", "action": "buy", "quantity": 5, "currency": "TL", "total_tl": 1000})
 
-            summary = manager.get_portfolio_summary({}, main.default_watchlist())
+            summary = manager.get_portfolio_summary({}, instruments.default_watchlist())
 
             self.assertEqual(summary["total_value_tl"], 0)
             self.assertFalse(summary["rows"][0]["has_price"])
@@ -672,7 +735,7 @@ class TestMultiAssetPortfolio(unittest.TestCase):
     def test_average_cost_survives_price_refresh_and_retains_historical_fx(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "transactions.json")
-            manager = main.TransactionManager(path)
+            manager = transactions.TransactionManager(path)
             manager.save_many([
                 {"instrument_key": "thyao", "quantity": 10, "total_tl": 1000},
                 {"instrument_key": "thyao", "quantity": 10, "total_tl": 2000},
@@ -681,7 +744,7 @@ class TestMultiAssetPortfolio(unittest.TestCase):
                 {"instrument_key": "aapl", "quantity": 2, "currency": "USD",
                  "total_usd": 100, "fx_rate": 40},
             ])
-            manager = main.TransactionManager(path)
+            manager = transactions.TransactionManager(path)
             with patch.object(
                 manager, "_calculate_positions", wraps=manager._calculate_positions
             ) as calculate:
@@ -689,7 +752,7 @@ class TestMultiAssetPortfolio(unittest.TestCase):
                     {"thyao": 180, "gumus_tl": 65, "dolar": 41},
                     {"thyao": 220, "gumus_tl": 70, "dolar": 45},
                 ):
-                    summary = manager.get_portfolio_summary(prices, main.default_watchlist())
+                    summary = manager.get_portfolio_summary(prices, instruments.default_watchlist())
                     rows = {row["key"]: row for row in summary["rows"]}
                     self.assertEqual(rows["thyao"]["average_cost_tl"], 150)
                     self.assertEqual(rows["gumus_tl"]["average_cost_tl"], 60)
@@ -699,7 +762,7 @@ class TestMultiAssetPortfolio(unittest.TestCase):
 
     def test_average_cost_handles_partial_sale_edits_and_closed_positions(self):
         with tempfile.TemporaryDirectory() as tmp:
-            manager = main.TransactionManager(os.path.join(tmp, "transactions.json"))
+            manager = transactions.TransactionManager(os.path.join(tmp, "transactions.json"))
             manager.save_many([
                 {"instrument_key": "thyao", "quantity": 10, "total_tl": 1000},
                 {"instrument_key": "thyao", "quantity": 10, "total_tl": 2000},
@@ -721,7 +784,7 @@ class TestMultiAssetPortfolio(unittest.TestCase):
     def test_invalid_batch_or_failed_write_leaves_ledger_and_cost_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "transactions.json")
-            manager = main.TransactionManager(path)
+            manager = transactions.TransactionManager(path)
             manager.save({"instrument_key": "thyao", "quantity": 10, "total_tl": 1000})
             second_buy = {"instrument_key": "thyao", "quantity": 10, "total_tl": 2000}
 
@@ -732,17 +795,17 @@ class TestMultiAssetPortfolio(unittest.TestCase):
                 ])
             self.assertEqual(manager.get_average_cost("thyao"), 100)
 
-            with patch.object(main.os, "replace", side_effect=OSError("write failed")):
+            with patch.object(widget_module.os, "replace", side_effect=OSError("write failed")):
                 with self.assertRaises(OSError):
                     manager.save(second_buy)
             self.assertEqual(manager.get_position_quantity("thyao"), 10)
             self.assertEqual(manager.get_average_cost("thyao"), 100)
-            self.assertEqual(main.TransactionManager(path).transactions, manager.transactions)
+            self.assertEqual(transactions.TransactionManager(path).transactions, manager.transactions)
 
     def test_edit_and_delete_validate_later_sales_in_ledger_order(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "transactions.json")
-            manager = main.TransactionManager(path)
+            manager = transactions.TransactionManager(path)
             first_buy = {"instrument_key": "thyao", "quantity": 5, "total_tl": 500}
             sale = {"instrument_key": "thyao", "action": "sell", "quantity": 4, "total_tl": 600}
             later_buy = {"instrument_key": "thyao", "quantity": 10, "total_tl": 2000}
@@ -762,7 +825,7 @@ class TestMultiAssetPortfolio(unittest.TestCase):
                 manager.delete(0)
 
             self.assertEqual(manager.transactions, expected)
-            self.assertEqual(main.TransactionManager(path).transactions, expected)
+            self.assertEqual(transactions.TransactionManager(path).transactions, expected)
             self.assertEqual(manager.get_position_quantity("thyao"), 12)
             self.assertAlmostEqual(manager.get_average_cost("thyao"), 2200 / 12)
 
@@ -774,7 +837,7 @@ class TestMultiAssetPortfolio(unittest.TestCase):
             with open(path, "w", encoding="utf-8") as file:
                 json.dump([original_buy, legacy_sale], file)
 
-            manager = main.TransactionManager(path)
+            manager = transactions.TransactionManager(path)
             self.assertIsNone(manager.get_average_cost("gumus_tl"))
             manager.replace(0, dict(original_buy, quantity=6, total_tl=600))
             manager.replace(1, dict(legacy_sale, quantity=4, total_tl=480))
@@ -786,14 +849,14 @@ class TestWatchlistManager(unittest.TestCase):
     def test_hidden_usd_position_stays_valued_and_can_be_restored_after_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "watchlist.json")
-            manager = main.WatchlistManager(path)
+            manager = watchlist.WatchlistManager(path)
             apple = manager.add("Apple", "AAPL", "$")
-            portfolio = main.TransactionManager(os.path.join(tmp, "transactions.json"))
+            portfolio = transactions.TransactionManager(os.path.join(tmp, "transactions.json"))
             portfolio.save({"instrument_key": apple["key"], "quantity": 1, "total_tl": 4000})
             manager.remove(apple["key"])
 
-            widget = main.PiyasaWidget.__new__(main.PiyasaWidget)
-            widget.watchlist_manager = main.WatchlistManager(path)
+            widget = widget_module.PiyasaWidget.__new__(widget_module.PiyasaWidget)
+            widget.watchlist_manager = watchlist.WatchlistManager(path)
             widget.watchlist = widget.watchlist_manager.instruments
             widget.tm = portfolio
             self.assertFalse(widget.watchlist_manager.has_symbol("AAPL"))
@@ -803,12 +866,12 @@ class TestWatchlistManager(unittest.TestCase):
             self.assertEqual(summary["total_value_tl"], 4800)
 
             widget.watchlist_manager.restore(apple["key"])
-            self.assertIn(apple, main.WatchlistManager(path).instruments)
+            self.assertIn(apple, watchlist.WatchlistManager(path).instruments)
 
     def test_defaults_include_thyao_and_user_symbols_are_persistent(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "watchlist.json")
-            manager = main.WatchlistManager(path)
+            manager = watchlist.WatchlistManager(path)
 
             self.assertTrue(any(item["symbol"] == "THYAO.IS" for item in manager.instruments))
             manager.add("Apple", "AAPL", "$")
@@ -817,46 +880,46 @@ class TestWatchlistManager(unittest.TestCase):
             with self.assertRaises(ValueError):
                 manager.add("Apple Again", "AAPL", "$")
 
-            manager_reloaded = main.WatchlistManager(path)
+            manager_reloaded = watchlist.WatchlistManager(path)
             self.assertTrue(manager_reloaded.has_symbol("AAPL"))
 
     def test_legacy_builtin_silver_symbols_migrate_to_spot(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "watchlist.json")
-            manager = main.WatchlistManager(path)
+            manager = watchlist.WatchlistManager(path)
             for instrument in manager.instruments:
-                if instrument["key"] in main.SILVER_SPOT_KEYS:
-                    instrument["symbol"] = main.LEGACY_SILVER_FUTURES_SYMBOL
+                if instrument["key"] in instruments.SILVER_SPOT_KEYS:
+                    instrument["symbol"] = instruments.LEGACY_SILVER_FUTURES_SYMBOL
                     instrument["source"] = (
                         "direct" if instrument["key"] == "gumus_ons" else "metal_try"
                     )
             manager.save_all()
 
-            migrated = main.WatchlistManager(path)
+            migrated = watchlist.WatchlistManager(path)
             silver = {
                 item["key"]: item
                 for item in migrated.instruments
-                if item["key"] in main.SILVER_SPOT_KEYS
+                if item["key"] in instruments.SILVER_SPOT_KEYS
             }
 
-            self.assertEqual(silver["gumus_ons"]["symbol"], main.SILVER_SPOT_SYMBOL)
+            self.assertEqual(silver["gumus_ons"]["symbol"], instruments.SILVER_SPOT_SYMBOL)
             self.assertEqual(silver["gumus_ons"]["source"], "silver_spot")
-            self.assertEqual(silver["gumus_tl"]["symbol"], main.SILVER_SPOT_SYMBOL)
+            self.assertEqual(silver["gumus_tl"]["symbol"], instruments.SILVER_SPOT_SYMBOL)
             self.assertEqual(silver["gumus_tl"]["source"], "silver_spot_try")
             self.assertEqual(
-                main.WatchlistManager(path).instruments,
+                watchlist.WatchlistManager(path).instruments,
                 migrated.instruments
             )
 
     def test_reordered_rows_are_persistent(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "watchlist.json")
-            manager = main.WatchlistManager(path)
+            manager = watchlist.WatchlistManager(path)
             reversed_keys = [item["key"] for item in reversed(manager.instruments)]
 
             self.assertTrue(manager.reorder(reversed_keys))
 
-            reloaded = main.WatchlistManager(path)
+            reloaded = watchlist.WatchlistManager(path)
             self.assertEqual(
                 [item["key"] for item in reloaded.instruments],
                 reversed_keys
@@ -864,7 +927,7 @@ class TestWatchlistManager(unittest.TestCase):
 
     def test_reorder_rejects_non_permutations_without_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
-            manager = main.WatchlistManager(os.path.join(tmp, "watchlist.json"))
+            manager = watchlist.WatchlistManager(os.path.join(tmp, "watchlist.json"))
             original = [item["key"] for item in manager.instruments]
 
             with self.assertRaises(ValueError):
@@ -879,15 +942,15 @@ class TestWatchlistManager(unittest.TestCase):
         midpoints = {"a": 10, "b": 20, "d": 40}
 
         self.assertEqual(
-            main.calculate_reordered_keys(keys, "c", 0, midpoints),
+            instruments.calculate_reordered_keys(keys, "c", 0, midpoints),
             ["c", "a", "b", "d"]
         )
         self.assertEqual(
-            main.calculate_reordered_keys(keys, "c", 25, midpoints),
+            instruments.calculate_reordered_keys(keys, "c", 25, midpoints),
             ["a", "b", "c", "d"]
         )
         self.assertEqual(
-            main.calculate_reordered_keys(keys, "c", 100, midpoints),
+            instruments.calculate_reordered_keys(keys, "c", 100, midpoints),
             ["a", "b", "d", "c"]
         )
 

@@ -7,7 +7,7 @@
 #define MyAppURL "https://github.com/musabhc/gumus-altin-guncel-widget"
 #define MyAppExeName "PiyasaWidget.exe"
 #ifndef BuildDir
-  #define BuildDir "dist\PiyasaWidget"
+  #define BuildDir "..\dist\PiyasaWidget"
 #endif
 
 [Setup]
@@ -25,12 +25,12 @@ DefaultDirName={userappdata}\{#MyAppName}
 DisableProgramGroupPage=yes
 ; Remove the following line to run in administrative install mode (install for all users.)
 PrivilegesRequired=lowest
-OutputDir=Output
+OutputDir=..\Output
 OutputBaseFilename=PiyasaWidget_Setup
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
-SetupIconFile=icon.ico
+SetupIconFile=..\piyasa\assets\icon.ico
 
 [Languages]
 Name: "turkish"; MessagesFile: "compiler:Languages\Turkish.isl"
@@ -42,7 +42,6 @@ Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescrip
 [Files]
 ; Mutable app data stays in its existing location during upgrades.
 Source: "{#BuildDir}\*"; Excludes: "transactions.json,watchlist.json,preferences.json,market_data.json,market_history.db,market_history.db-*,ledger-backups\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

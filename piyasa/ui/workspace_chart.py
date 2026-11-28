@@ -10,9 +10,10 @@ from tkinter import ttk
 
 from PIL import Image, ImageDraw, ImageTk
 
-from rendering import render_chart_line
-from theme import THEME, font
-from ui_components import IconButton, SegmentedControl
+from piyasa.market.series import sample_chart_rows
+from piyasa.ui.components import IconButton, SegmentedControl
+from piyasa.ui.rendering import render_chart_line
+from piyasa.ui.theme import THEME, font
 
 
 DAY = 24 * 60 * 60
@@ -97,6 +98,7 @@ class WorkspaceChart(tk.Frame):
         self._hover_index = None
         self._message = "Bir varlık seç"
         self._history_meta = ""
+        self._history_interval = None
         self.period = tk.IntVar(master=self, value=initial_period)
 
         top = tk.Frame(self, bg=THEME["surface"])
@@ -263,8 +265,9 @@ class WorkspaceChart(tk.Frame):
             return
 
         self._set_history_meta(series, source, interval)
-        if series == self._series and series:
+        if series and series == self._series and interval == self._history_interval:
             return
+        self._history_interval = interval
         self._series = series
         self._times = tuple(row[0] for row in series)
         self._message = "Bu aralık için henüz veri yok"
@@ -381,7 +384,10 @@ class WorkspaceChart(tk.Frame):
             y = bottom - (bottom - top) * (value - low) / (high - low)
             return x, y
 
-        sampled = self._downsample(rows, max(100, width if preview else width * 2))
+        sampled, breaks = sample_chart_rows(
+            rows, max(100, width if preview else width * 2), self._history_interval,
+            downsample=self._downsample,
+        )
         points = [coordinates(row) for row in sampled]
         background = Image.new("RGB", (width, height), THEME["surface"])
         draw = ImageDraw.Draw(background)
@@ -390,7 +396,7 @@ class WorkspaceChart(tk.Frame):
             for x in range(left, right, 8):
                 draw.line((x, round(y), min(x + 3, right), round(y)), fill=THEME["border"])
         line = render_chart_line(
-            width, height, points, color, stroke=2, endpoint=3, fill_to=bottom, preview=preview,
+            width, height, points, color, stroke=2, endpoint=3, fill_to=bottom, preview=preview, breaks=breaks,
         )
         background.paste(line, (0, 0), line.getchannel("A"))
         self._image = ImageTk.PhotoImage(background, master=canvas)

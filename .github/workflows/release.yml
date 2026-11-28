@@ -30,7 +30,7 @@ jobs:
     - name: Install Dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller requests yfinance pillow
+        python -m pip install -r requirements.txt pyinstaller
         
     - name: Create Self-Signed Certificate
       run: |
@@ -42,7 +42,8 @@ jobs:
 
     - name: Build EXE
       run: |
-        pyinstaller --onedir --contents-directory _internal --noconsole --name "PiyasaWidget" --icon=icon.ico --hidden-import=_version main.py
+        $icon = (Resolve-Path piyasa/assets/icon.ico).Path
+        python -m PyInstaller --onedir --contents-directory _internal --noconsole --name PiyasaWidget --icon "$icon" --add-data "${icon}:piyasa/assets" --hidden-import=_version main.py
         
     - name: Sign EXE
       run: |
@@ -54,7 +55,7 @@ jobs:
         choco install innosetup
         # Inno Setup Sign Tool Configuration (Advanced - usually needs GUI config or complex CLI)
         # For simplicity, we just sign the output installer after compilation
-        & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
+        & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\setup.iss
         
     - name: Sign Installer
       run: |

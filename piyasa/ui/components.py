@@ -9,8 +9,8 @@ import tkinter as tk
 from tkinter import ttk
 from PIL import ImageTk
 
-from theme import SPACING, THEME, font
-from rendering import render_icon
+from piyasa.ui.theme import THEME, font
+from piyasa.ui.rendering import render_icon
 
 
 def monitor_work_area(x, y, width, height):
